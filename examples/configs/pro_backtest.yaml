@@ -1,0 +1,5 @@
+# LatencyConfig — tune these to your venue/co-lo setup
+feed_us: 100.0      # feed-to-strategy latency (median, us)
+order_us: 450.0     # order round-trip (median, us)
+cancel_us: 280.0    # cancel round-trip (median, us)
+jitter: 0.20        # lognormal sigma; higher = more latency variance
