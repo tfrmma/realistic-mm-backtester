@@ -81,9 +81,24 @@ class TestDeterminism:
         assert r1.realized_pnl == pytest.approx(r2.realized_pnl)
 
     def test_different_seeds_may_differ(self):
+        # _pro()'s default latency (order_us=400, cancel_us=250) never approaches
+        # the 1000us synthetic tick spacing, so every sampled arrival lands in the
+        # same next tick regardless of seed -> fills come out identical. That's a
+        # real property of the tick-quantized engine (see pro.py's stale-book TODO),
+        # not proof the RNG is broken. To actually exercise seed-driven divergence
+        # here, use latency on the same order as the tick spacing so the sampled
+        # value can flip which tick an order registers in.
         ticks = _ticks(n=5_000)
-        e1 = _pro(seed=1); e1.add_strategy("mm", _QuoteStrategy("BTC-USD"), "BTC-USD")
-        e2 = _pro(seed=2); e2.add_strategy("mm", _QuoteStrategy("BTC-USD"), "BTC-USD")
+
+        def _wide_latency_pro(seed: int) -> ProBacktestEngine:
+            return ProBacktestEngine(
+                latency_config=LatencyConfig(order_us=1200.0, cancel_us=900.0, jitter=0.35),
+                cancel_model=ReduceRatioCancelModel(0.15),
+                fee_rate=0.0001, snapshot_every=50, seed=seed,
+            )
+
+        e1 = _wide_latency_pro(seed=1); e1.add_strategy("mm", _QuoteStrategy("BTC-USD"), "BTC-USD")
+        e2 = _wide_latency_pro(seed=2); e2.add_strategy("mm", _QuoteStrategy("BTC-USD"), "BTC-USD")
         r1, r2 = e1.run(ticks)["mm"], e2.run(ticks)["mm"]
         assert (len(r1.fills) != len(r2.fills)) or (r1.fees_paid != r2.fees_paid)
 
@@ -105,9 +120,13 @@ class TestPnLAccounting:
         assert m.realized_pnl == pytest.approx(0.0)
 
     def test_maker_rebate_non_positive_fees(self):
+        # fee_rate is the base (positive) rate. InventoryState.apply_fill already
+        # negates it for maker fills (fees_paid += -fee if is_maker), so the rebate
+        # falls out on its own -- passing a negative fee_rate here double-flips the
+        # sign and produces a *positive* fees_paid, which is what was failing.
         e = ProBacktestEngine(
             latency_config=LatencyConfig(order_us=200.0, jitter=0.10),
-            fee_rate=-0.0001, snapshot_every=50, seed=99,
+            fee_rate=0.0001, snapshot_every=50, seed=99,
         )
         e.add_strategy("mm", _QuoteStrategy("BTC-USD"), "BTC-USD")
         m = e.run(_ticks(n=5_000))["mm"]
