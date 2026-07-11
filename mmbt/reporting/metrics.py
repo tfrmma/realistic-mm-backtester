@@ -115,8 +115,15 @@ def _sharpe(equity_vals: list[float]) -> float:
     if len(equity_vals) < 2:
         return 0.0
     returns = np.diff(equity_vals)
-    std = float(np.std(returns))
-    return 0.0 if std < 1e-12 else float(np.mean(returns) / std)
+    mean = float(np.mean(returns))
+    std  = float(np.std(returns))
+    if std < 1e-12:
+        # zero variance: flat equity -> no signal either way (0.0). Constant
+        # *positive* (or negative) step size is a degenerate "no risk" case,
+        # not an undefined one -- floor the denominator instead of collapsing
+        # a real directional signal to 0.0.
+        return 0.0 if abs(mean) < 1e-12 else mean / 1e-12
+    return mean / std
 
 
 def _max_drawdown(equity_vals: list[float]) -> float:
