@@ -23,7 +23,7 @@ Most open-source backtesters fill your passive orders the moment a trade crosses
 ## Install
 
 ```bash
-git clone https://github.com/tfrmma/realistic-mm-backtester
+git clone https://github.com/tfrmma/realistic-mm-backtester.git
 cd realistic-mm-backtester
 pip install -e ".[dev]"
 ```
