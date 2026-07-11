@@ -1,7 +1,7 @@
 # ── Python-only build (default) ───────────────────────────────────────────────
 [build-system]
 requires      = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 # To build WITH the Rust extension (S5 hot path):
 #   pip install maturin
