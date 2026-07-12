@@ -17,7 +17,7 @@ def _level_columns(columns: set[str], prefix: str) -> list[tuple[str, str]]:
     backward compatibility with single-level CSVs. Deeper levels are
     `{prefix}_px_2`/`{prefix}_sz_2`, `{prefix}_px_3`/`{prefix}_sz_3`, etc.,
     picked up in order until a number is missing. Provide as many as your
-    data has (5-10 is typical for real queue simulation) -- one level still
+    data has (5-10 is typical for real queue simulation) one level still
     works exactly like before.
     """
     pairs: list[tuple[str, str]] = []
@@ -32,7 +32,7 @@ def _level_columns(columns: set[str], prefix: str) -> list[tuple[str, str]]:
 
 class TickLoader:
     """
-    Lazy tick iterator. Wraps any source — CSV, Parquet, synthetic.
+    Lazy tick iterator. Wraps any source CSV, Parquet, synthetic.
     Use to_list() only when you know the dataset fits in RAM.
     """
 
@@ -59,9 +59,9 @@ class TickLoader:
         return cls(lambda: _csv_iter(p, symbol, chunk_size))
 
     @classmethod
-    def from_parquet(cls, path: str | Path, symbol: str = "UNKNOWN") -> TickLoader:
+    def from_parquet(cls, path: str | Path, symbol: str = "UNKNOWN", batch_size: int = 65_536) -> TickLoader:
         p = Path(path)
-        return cls(lambda: _parquet_iter(p, symbol))
+        return cls(lambda: _parquet_iter(p, symbol, batch_size))
 
     @classmethod
     def synthetic(cls, config: SyntheticConfig) -> TickLoader:
@@ -87,21 +87,30 @@ def _csv_iter(path: Path, symbol: str, chunk_size: int) -> Iterator[MarketTick]:
             yield _row_to_tick(row, symbol, bid_cols, ask_cols)
 
 
-def _parquet_iter(path: Path, symbol: str) -> Iterator[MarketTick]:
+def _parquet_iter(path: Path, symbol: str, batch_size: int) -> Iterator[MarketTick]:
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        raise ImportError("pyarrow required for Parquet reads: pip install mmbt[dev]")
     try:
         import pandas as pd
     except ImportError:
         raise ImportError("pandas required: pip install mmbt[dev]")
 
-    # loads full file — TODO: row-group streaming for large Parquet files
-    df = pd.read_parquet(path)
-    missing = _REQUIRED - set(df.columns)
+    pf      = pq.ParquetFile(path)
+    columns = set(pf.schema_arrow.names)
+    missing = _REQUIRED - columns
     if missing:
         raise ValueError(f"Parquet missing columns: {missing}")
-    bid_cols = _level_columns(set(df.columns), "bid")
-    ask_cols = _level_columns(set(df.columns), "ask")
-    for _, row in df.iterrows():
-        yield _row_to_tick(row, symbol, bid_cols, ask_cols)
+    bid_cols = _level_columns(columns, "bid")
+    ask_cols = _level_columns(columns, "ask")
+
+    # iter_batches reads row-group by row-group (chunked further to batch_size),
+    # never materializing the whole file needed for multi-month tick datasets
+    for batch in pf.iter_batches(batch_size=batch_size):
+        chunk = batch.to_pandas()
+        for _, row in chunk.iterrows():
+            yield _row_to_tick(row, symbol, bid_cols, ask_cols)
 
 
 def _row_to_tick(
@@ -137,7 +146,7 @@ def _row_to_tick(
 
 
 def _levels(row: object, cols: list[tuple[str, str]], pd) -> list[BookLevel]:
-    # stop at the first missing/NaN level -- a shallower book on some rows
+    # stop at the first missing/NaN level a shallower book on some rows
     # (thin period, exchange only sent N levels that tick) is normal, not an error
     levels: list[BookLevel] = []
     for px_col, sz_col in cols:
