@@ -1,5 +1,29 @@
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::collections::HashMap;
+
+#[derive(Clone, Copy)]
+enum CancelModelKind {
+    ReduceRatio { ratio: f64 },
+    ProbQueue { min_ratio: f64, max_ratio: f64 },
+}
+
+impl CancelModelKind {
+    // mirrors CancelModel.cancelled_fraction() from queue/cancel_models.py 
+    // keep the two in sync if either changes
+    fn cancelled_fraction(&self, qty_in_front: f64, trade_size: f64) -> f64 {
+        match *self {
+            CancelModelKind::ReduceRatio { ratio } => ratio,
+            CancelModelKind::ProbQueue { min_ratio, max_ratio } => {
+                if qty_in_front <= 0.0 {
+                    0.0
+                } else {
+                    (trade_size / qty_in_front).max(min_ratio).min(max_ratio)
+                }
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 struct OrderSlot {
@@ -18,20 +42,40 @@ type FillTuple = (String, String, i8, f64, f64, bool, f64, f64, f64);
 #[pyclass]
 pub struct FIFOQueueCore {
     slots:        HashMap<String, OrderSlot>,
-    prev_book:    HashMap<u64, f64>,  // f64.to_bits() as key — safe for finite prices
-    cancel_ratio: f64,
+    prev_book:    HashMap<u64, f64>,  // f64.to_bits() as key safe for finite prices
+    cancel_model: CancelModelKind,
 }
 
 #[pymethods]
 impl FIFOQueueCore {
+    // Pass EITHER cancel_ratio (ReduceRatioCancelModel) OR min_ratio+max_ratio
+    // (ProbQueueCancelModel), never a mix. Mirrors the two Python CancelModel
+    // implementations in queue/cancel_models.py see fifo.py's
+    // _build_rust_core() for which Python objects map to which constructor call.
     #[new]
-    #[pyo3(signature = (cancel_ratio = 0.20))]
-    fn new(cancel_ratio: f64) -> Self {
-        FIFOQueueCore {
+    #[pyo3(signature = (cancel_ratio = None, min_ratio = None, max_ratio = None))]
+    fn new(cancel_ratio: Option<f64>, min_ratio: Option<f64>, max_ratio: Option<f64>) -> PyResult<Self> {
+        let cancel_model = match (cancel_ratio, min_ratio, max_ratio) {
+            (Some(ratio), None, None) => CancelModelKind::ReduceRatio { ratio },
+            (None, None, None)        => CancelModelKind::ReduceRatio { ratio: 0.20 },  // default
+            (None, Some(mn), Some(mx)) => {
+                if mn < 0.0 || mx < mn {
+                    return Err(PyValueError::new_err(
+                        "min_ratio must be >= 0.0 and <= max_ratio",
+                    ));
+                }
+                CancelModelKind::ProbQueue { min_ratio: mn, max_ratio: mx }
+            }
+            _ => return Err(PyValueError::new_err(
+                "pass either cancel_ratio (ReduceRatioCancelModel) or \
+                 min_ratio+max_ratio together (ProbQueueCancelModel), not a mix",
+            )),
+        };
+        Ok(FIFOQueueCore {
             slots: HashMap::new(),
             prev_book: HashMap::new(),
-            cancel_ratio,
-        }
+            cancel_model,
+        })
     }
 
     // qty_in_front is computed Python-side (_qty_in_front needs the full book)
@@ -74,7 +118,7 @@ impl FIFOQueueCore {
                 if filled_ids.contains(oid) {
                     continue;
                 }
-                if let Some(f) = try_fill(slot, *tp, *ts, *trade_side, *trade_ts, self.cancel_ratio) {
+                if let Some(f) = try_fill(slot, *tp, *ts, *trade_side, *trade_ts, self.cancel_model) {
                     fills.push(f);
                     filled_ids.push(oid.clone());
                 }
@@ -130,7 +174,7 @@ fn try_fill(
     trade_size:   f64,
     trade_side:   i8,
     trade_ts:     f64,
-    cancel_ratio: f64,
+    cancel_model: CancelModelKind,
 ) -> Option<FillTuple> {
     match slot.side {
         1  => { if trade_side != -1 || trade_price > slot.price + 1e-12 { return None; } }
@@ -139,7 +183,8 @@ fn try_fill(
     }
 
     let fill_size = if slot.qty_in_front > 0.0 {
-        let consumed  = trade_size * (1.0 + cancel_ratio);
+        let frac      = cancel_model.cancelled_fraction(slot.qty_in_front, trade_size);
+        let consumed  = trade_size * (1.0 + frac);
         let raw_q     = slot.qty_in_front - consumed;
         let overshoot = (-raw_q).max(0.0);
         slot.qty_in_front = raw_q.max(0.0);
