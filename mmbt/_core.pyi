@@ -14,7 +14,18 @@ class FIFOQueueCore:
     Instantiated and managed by FIFOQueueSimulator — don't use directly.
     """
 
-    def __init__(self, cancel_ratio: float = 0.20) -> None: ...
+    def __init__(
+        self,
+        cancel_ratio: float | None = None,
+        min_ratio:    float | None = None,
+        max_ratio:    float | None = None,
+    ) -> None:
+        """
+        Pass EITHER cancel_ratio (ReduceRatioCancelModel) OR min_ratio+max_ratio
+        together (ProbQueueCancelModel), never a mix. No args = ReduceRatio
+        default of 0.20, matching the Python default.
+        """
+        ...
 
     def register(
         self,
