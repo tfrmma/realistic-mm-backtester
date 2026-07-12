@@ -1,6 +1,6 @@
 # realistic-mm-backtester - market making backtester
 
-**Institutional-grade FIFO queue simulation for market making strategies.**
+**FIFO queue simulation for market making strategies.**
 
 Most open-source backtesters fill your passive orders the moment a trade crosses your price. That's not how exchanges work. This one actually models the queue.
 
