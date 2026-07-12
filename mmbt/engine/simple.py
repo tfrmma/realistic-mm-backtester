@@ -89,6 +89,8 @@ class BacktestEngine:
 
         state.pending.extend(self._risk.check(new_orders, state.inventory, book))
 
+    _DUST = 1e-9  # below this, an order can't produce a meaningful fill anymore
+
     def _try_fill(
         self,
         orders: list[Order],
@@ -97,6 +99,19 @@ class BacktestEngine:
         ts: float,
     ) -> tuple[list[tuple[Order, Fill]], list[Order]]:
         # build (order, fill) pairs in the loop zip on misaligned lists was a previous bug
+        #
+        # PassiveFillSimulator.simulate() can return a fill smaller than
+        # order.size (a partial fill, e.g. pro-rata share of a level's depth).
+        # Only drop the order once it's fully exhausted the remainder keeps
+        # resting at the same price/order_id and can catch further fills on
+        # later ticks, same as a real passive order would.
+        #
+        # Eviction is based on the order's remaining size, not on whether this
+        # tick produced a fill: PassiveFillSimulator has its own epsilon guard
+        # (won't emit a fill sized <=1e-12), so a shrinking order can otherwise
+        # get stuck forever just above that floor, never quite hitting it and
+        # never getting swept out either. Checking size directly avoids that
+        # dead zone.
         fills: list[tuple[Order, Fill]] = []
         remaining: list[Order] = []
         for order in orders:
@@ -104,6 +119,7 @@ class BacktestEngine:
             if fill:
                 fill.ts = ts
                 fills.append((order, fill))
-            else:
+                order.size -= fill.size
+            if order.size > self._DUST:
                 remaining.append(order)
         return fills, remaining
