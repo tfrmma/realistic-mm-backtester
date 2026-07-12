@@ -5,7 +5,8 @@ from typing import Iterable
 
 from mmbt.core.protocol import RiskManager, Strategy
 from mmbt.core.types import CancelOrder, Fill, InventoryState, MarketTick, Order, OrderBook, Trade
-from mmbt.queue.passive import PassiveFillSimulator
+from mmbt.queue.passive import PassiveFillSimulator, try_fill_orders
+from mmbt.queue.taker import crosses_book, sweep_book
 from mmbt.reporting.metrics import EquitySnapshot, FillRecord, StrategyMetrics
 from mmbt.risk.base import NullRiskManager
 
@@ -22,23 +23,32 @@ class _StratState:
 
 class BacktestEngine:
     """
-    Simple tick-by-tick engine. Fills are immediate when a trade crosses price.
-    Optimistic, but fast good for parameter sweeps.
-    Use ProBacktestEngine when fill realism matters.
+    Simple tick-by-tick engine. Passive fills are immediate when a trade
+    crosses a resting order's price. Optimistic, but fast, good for
+    parameter sweeps. Use ProBacktestEngine when fill realism matters.
+
+    Orders that cross the book at submission (order.price already inside the
+    spread) are handled as taker orders instead of resting: filled
+    immediately against visible depth (see queue/taker.py), or rejected if
+    is_post_only=True, same as a real exchange would reject a post-only
+    order that would take liquidity. Any unfilled remainder of a taker order
+    does not rest (IOC semantics), matching a real market/IOC order.
     """
 
     def __init__(
         self,
         fill_sim: PassiveFillSimulator | None = None,
         risk: RiskManager | None = None,
-        fee_rate: float = 0.0,
+        fee_rate_maker: float = 0.0,
+        fee_rate_taker: float = 0.0,
         snapshot_every: int = 100,
         mid_history_capacity: int = 200_000,
     ) -> None:
-        self._fill_sim      = fill_sim or PassiveFillSimulator()
-        self._risk          = risk or NullRiskManager()
-        self._fee_rate      = fee_rate
-        self._snapshot_every = snapshot_every
+        self._fill_sim         = fill_sim or PassiveFillSimulator()
+        self._risk             = risk or NullRiskManager()
+        self._fee_rate_maker   = fee_rate_maker
+        self._fee_rate_taker   = fee_rate_taker
+        self._snapshot_every   = snapshot_every
         self._mid_history_capacity = mid_history_capacity
         self._strats: dict[str, _StratState] = {}
 
@@ -59,16 +69,10 @@ class BacktestEngine:
         return {name: s.metrics for name, s in self._strats.items()}
 
     def _step(self, state: _StratState, book: OrderBook, trades: list[Trade], ts: float) -> None:
-        fills, remaining = self._try_fill(state.pending, trades, book, ts)
+        fills, remaining = try_fill_orders(self._fill_sim, state.pending, trades, book, ts)
         state.pending = remaining
-
         for _, fill in fills:
-            state.inventory.apply_fill(fill, self._fee_rate)
-            state.strategy.on_fill(fill)
-            state.metrics.fills.append(fill)
-            state.metrics.fill_records.append(FillRecord(fill=fill, mid_at_fill=book.mid))
-            state.metrics.realized_pnl = state.inventory.realized_pnl
-            state.metrics.fees_paid    = state.inventory.fees_paid
+            self._record_fill(state, fill, book)
 
         state.metrics.mid_history.append((ts, book.mid))
 
@@ -82,46 +86,34 @@ class BacktestEngine:
                 fees_paid=state.inventory.fees_paid,
             ))
 
-        actions   = state.strategy.on_tick(book, trades)
-        cancels   = {a.order_id for a in actions if isinstance(a, CancelOrder)}
+        actions    = state.strategy.on_tick(book, trades)
+        cancels    = {a.order_id for a in actions if isinstance(a, CancelOrder)}
         new_orders = [a for a in actions if isinstance(a, Order)]
 
         if cancels:
             state.pending = [o for o in state.pending if o.order_id not in cancels]
 
-        state.pending.extend(self._risk.check(new_orders, state.inventory, book))
+        for order in self._risk.check(new_orders, state.inventory, book):
+            if not crosses_book(order, book):
+                state.pending.append(order)
+                continue
+            if order.is_post_only:
+                state.metrics.rejected_orders += 1
+                continue
+            execution = sweep_book(order, book)
+            if execution is None:
+                continue  # crossed on paper but the crossed side had no real depth
+            self._record_fill(state, Fill(
+                order_id=order.order_id, symbol=order.symbol, side=order.side,
+                price=execution.vwap_price, size=execution.filled_size,
+                is_maker=False, ts=ts,
+            ), book)
+            # any unfilled remainder does NOT rest IOC semantics, like a real taker order
 
-    _DUST = 1e-9  # below this, an order can't produce a meaningful fill anymore
-
-    def _try_fill(
-        self,
-        orders: list[Order],
-        trades: list[Trade],
-        book: OrderBook,
-        ts: float,
-    ) -> tuple[list[tuple[Order, Fill]], list[Order]]:
-        # build (order, fill) pairs in the loop zip on misaligned lists was a previous bug
-        #
-        # PassiveFillSimulator.simulate() can return a fill smaller than
-        # order.size (a partial fill, e.g. pro-rata share of a level's depth).
-        # Only drop the order once it's fully exhausted -- the remainder keeps
-        # resting at the same price/order_id and can catch further fills on
-        # later ticks, same as a real passive order would.
-        #
-        # Eviction is based on the order's remaining size, not on whether this
-        # tick produced a fill: PassiveFillSimulator has its own epsilon guard
-        # (won't emit a fill sized <=1e-12), so a shrinking order can otherwise
-        # get stuck forever just above that floor, never quite hitting it and
-        # never getting swept out either. Checking size directly avoids that
-        # dead zone.
-        fills: list[tuple[Order, Fill]] = []
-        remaining: list[Order] = []
-        for order in orders:
-            fill = self._fill_sim.simulate(order, trades, book)
-            if fill:
-                fill.ts = ts
-                fills.append((order, fill))
-                order.size -= fill.size
-            if order.size > self._DUST:
-                remaining.append(order)
-        return fills, remaining
+    def _record_fill(self, state: _StratState, fill: Fill, book: OrderBook) -> None:
+        state.inventory.apply_fill(fill, self._fee_rate_maker, self._fee_rate_taker)
+        state.strategy.on_fill(fill)
+        state.metrics.fills.append(fill)
+        state.metrics.fill_records.append(FillRecord(fill=fill, mid_at_fill=book.mid))
+        state.metrics.realized_pnl = state.inventory.realized_pnl
+        state.metrics.fees_paid    = state.inventory.fees_paid
