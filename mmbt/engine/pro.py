@@ -53,6 +53,7 @@ class ProBacktestEngine:
         snapshot_every: int = 100,
         seed: int | None = None,
         book_history_size: int = 2_000,
+        mid_history_capacity: int = 200_000,
     ) -> None:
         self._lat_cfg          = latency_config or LatencyConfig()
         self._cancel_model     = cancel_model or ReduceRatioCancelModel()
@@ -60,7 +61,8 @@ class ProBacktestEngine:
         self._fee_rate         = fee_rate
         self._snapshot_every   = snapshot_every
         self._seed             = seed
-        self._book_history_size = book_history_size
+        self._book_history_size    = book_history_size
+        self._mid_history_capacity = mid_history_capacity
         self._strats: dict[str, _StratState] = {}
 
     def add_strategy(self, name: str, strategy: Strategy, symbol: str) -> None:
@@ -73,7 +75,7 @@ class ProBacktestEngine:
             inventory=InventoryState(symbol=symbol),
             latency_sim=LatencySimulator(self._lat_cfg, seed=strat_seed),
             queue_sim=FIFOQueueSimulator(self._cancel_model),
-            metrics=StrategyMetrics(symbol=symbol),
+            metrics=StrategyMetrics(symbol=symbol, mid_history_capacity=self._mid_history_capacity),
             book_history=BookHistory(maxlen=self._book_history_size),
             snapshot_every=self._snapshot_every,
         )
@@ -112,7 +114,7 @@ class ProBacktestEngine:
             ))
 
         # true tick goes into the ring buffer first, then the strategy is fed
-        # whatever it would actually have received feed_us later -- fills above
+        # whatever it would actually have received feed_us later fills above
         # already happened against the TRUE book, only the strategy's view is stale
         state.book_history.push(ts, book, trades)
         feed_delay   = state.latency_sim.feed_delay_us()
