@@ -14,7 +14,7 @@ Most open-source backtesters fill your passive orders the moment a trade crosses
 
 **Latency modeling.** Orders and cancels don't arrive at the exchange instantly. The engine samples from a lognormal distribution (fits real co-lo latencies well) and delays execution accordingly. Your strategy sees a stale book; your orders arrive late.
 
-**Cancel/re-quote lifecycle.** A market maker that can't cancel orders isn't making markets. `CancelOrder` is a first-class type — strategies return mixed lists of `Order` and `CancelOrder` from `on_tick`.
+**Cancel/re-quote lifecycle.** A market maker that can't cancel orders isn't making markets. `CancelOrder` is a first-class type, strategies return mixed lists of `Order` and `CancelOrder` from `on_tick`.
 
 **Two engines, one interface.** `BacktestEngine` is fast and optimistic, use it for parameter sweeps. `ProBacktestEngine` is realistic, use it when you need to believe the results.
 
@@ -23,7 +23,7 @@ Most open-source backtesters fill your passive orders the moment a trade crosses
 ## Install
 
 ```bash
-git clone https://github.com/tfrmma/realistic-mm-backtester.git
+git clone https://github.com/tfrmma/realistic-mm-backtester
 cd realistic-mm-backtester
 pip install -e ".[dev]"
 ```
@@ -105,7 +105,7 @@ class MyStrategy(BaseStrategy):
 ## Rust hot path (S5)
 
 The FIFO queue inner loop is ported to Rust via PyO3. The Python API is
-identical — the swap is transparent.
+identical, the swap is transparent.
 
 ```python
 from mmbt.queue.fifo import RUST_AVAILABLE
@@ -175,7 +175,7 @@ Implement the `Exchange` protocol to add live feed or other venue adapters.
 
 ## Inventory skew strategy (S4)
 
-`InventorySkewMM` is the second reference implementation — shifts quotes based on position:
+`InventorySkewMM` is the second reference implementation, shifts quotes based on position:
 
 ```python
 from examples.strategies.inventory_skew_mm import InventorySkewMM
@@ -191,10 +191,10 @@ strat = InventorySkewMM(
 
 ## Parameter sweeps (S3)
 
-Define a module-level `run_fn` (no lambdas — they can't be pickled by `ProcessPoolExecutor`):
+Define a module-level `run_fn` (no lambdas, they can't be pickled by `ProcessPoolExecutor`):
 
 ```python
-# examples/sweep_example.py — run_fn at module level
+# examples/sweep_example.py, run_fn at module level
 from mmbt.core.types import MarketTick
 from mmbt.reporting.metrics import StrategyMetrics
 from mmbt.engine.pro import ProBacktestEngine
@@ -266,36 +266,47 @@ loader = TickLoader.synthetic(SyntheticConfig(n_ticks=50_000, seed=42))
 engine.run(loader)   # engines accept any Iterable[MarketTick]
 ```
 
-CSV format (trade columns optional — leave empty for book-only ticks):
+CSV format (trade columns optional, leave empty for book-only ticks):
 ```
 ts,bid_px,bid_sz,ask_px,ask_sz,trade_px,trade_sz,trade_side
 1000.0,49990.0,1.5,50000.0,2.0,,,
 2000.0,49985.0,1.2,49995.0,1.8,49985.0,0.5,SELL
 ```
 
+Multi-level book (optional, 5-10 levels recommended for realistic queue simulation):
+add `bid_px_2,bid_sz_2,ask_px_2,ask_sz_2`, `bid_px_3,bid_sz_3,...` and so on —
+level 1 stays bare (`bid_px`/`bid_sz`) for backward compatibility. Levels are
+read in order and stop at the first missing/blank one, so a thinner book on
+some rows (exchange only sent N levels that tick) is fine, not an error:
+```
+ts,bid_px,bid_sz,ask_px,ask_sz,bid_px_2,bid_sz_2,ask_px_2,ask_sz_2
+1000.0,49990.0,1.5,50000.0,2.0,49985.0,3.0,50005.0,2.5
+```
+Same convention for Parquet.
+
 ## Architecture
 
 ```
 mmbt/
 ├── core/
-│   ├── types.py        — BookLevel, OrderBook, Trade, Order, CancelOrder, Fill, InventoryState
-│   └── protocol.py     — Strategy, RiskManager, Exchange (typing.Protocol)
+│   ├── types.py            BookLevel, OrderBook, Trade, Order, CancelOrder, Fill, InventoryState
+│   └── protocol.py         Strategy, RiskManager, Exchange (typing.Protocol)
 │
 ├── queue/
-│   ├── fifo.py         — FIFOQueueState, FIFOQueueSimulator (iceberg detection, cancel support)
-│   ├── cancel_models.py — ReduceRatioCancelModel, ProbQueueCancelModel
-│   └── passive.py      — PassiveFillSimulator (used by BacktestEngine)
+│   ├── fifo.py             FIFOQueueState, FIFOQueueSimulator (iceberg detection, cancel support)
+│   ├── cancel_models.py    ReduceRatioCancelModel, ProbQueueCancelModel
+│   └── passive.py          PassiveFillSimulator (used by BacktestEngine)
 │
 ├── latency/
-│   ├── config.py       — LatencyConfig (Pydantic, YAML/JSON serializable)
-│   └── simulator.py    — LatencySimulator (min-heap event queue)
+│   ├── config.py           LatencyConfig (Pydantic, YAML/JSON serializable)
+│   └── simulator.py        LatencySimulator (min-heap event queue)
 │
 ├── risk/
-│   └── base.py         — NullRiskManager, MaxInventoryRiskManager
+│   └── base.py             NullRiskManager, MaxInventoryRiskManager
 │
 └── engine/
-    ├── simple.py       — BacktestEngine (fast, heuristic fills, no latency)
-    └── pro.py          — ProBacktestEngine (FIFO queue + latency, the realistic one)
+    ├── simple.py           BacktestEngine (fast, heuristic fills, no latency)
+    └── pro.py              ProBacktestEngine (FIFO queue + latency, the realistic one)
 ```
 
 ---
@@ -320,7 +331,7 @@ Implement `CancelModel` protocol to plug in your own calibration.
 feed_us: 100.0      # feed-to-strategy latency (median, microseconds)
 order_us: 450.0     # order round-trip (median, microseconds)
 cancel_us: 280.0    # cancel round-trip (median, microseconds)
-jitter: 0.20        # lognormal sigma — 0.20 fits most co-lo setups
+jitter: 0.20        # lognormal sigma, 0.20 fits most co-lo setups
 ```
 
 Latencies are sampled from a lognormal distribution per-event. Increase `jitter` to model noisier network paths.
@@ -331,24 +342,24 @@ Latencies are sampled from a lognormal distribution per-event. Increase `jitter`
 
 | Sprint | Status | Scope |
 |---|---|---|
-| S1 — Foundation | done | Core types, FIFO queue, cancel support, both engines |
-| S2 — Reporting | done | Equity curve, inventory heatmap, adverse selection charts, TickLoader |
-| S3 — Engine + Sweep | done | ParameterSweep, parallel runs, sweep plots |
-| S4 — Launch | done | Exchange Protocol, Portfolio, InventorySkewMM, 80 tests, CI |
-| S5 — Rust hot path | done | PyO3 port of FIFOQueueSimulator for multi-month datasets |
+| S1: Foundation | done | Core types, FIFO queue, cancel support, both engines |
+| S2: Reporting | done | Equity curve, inventory heatmap, adverse selection charts, TickLoader |
+| S3: Engine + Sweep | done | ParameterSweep, parallel runs, sweep plots |
+| S4: Launch | done | Exchange Protocol, Portfolio, InventorySkewMM, 80 tests, CI |
+| S5: Rust hot path | done | PyO3 port of FIFOQueueSimulator for multi-month datasets |
 
 ---
 
-## Known limitations (S2)
+## Known limitations
 
-- **Feed latency** is not actually applied to the book the strategy sees, it receives the current tick's book. Proper stale-book simulation requires book history; it's on the S2 list.
-- **Multi-asset** inventory tracking is single-symbol for now.
+- **Multi-asset**: `Portfolio` aggregates PnL/positions across symbols, but each `ProBacktestEngine`/`BacktestEngine` still only drives one symbol's tick stream, running N symbols means running N engines today. A `MultiAssetEngine` that interleaves ticks across symbols by timestamp is on the roadmap.
+- **CSV/Parquet book depth** is capped by whatever your data provides, the loader reads as many levels as you give it, but doesn't synthesize missing ones.
 
 ---
 
 ## Contact
 
-Built by **Taha** — algorithmic trader focused on execution and microstructure.
+Built by **Taha** algorithmic trader focused on execution and microstructure.
 
 - Email: fadilrezokt@gmail.com
 - LinkedIn: [linkedin.com/in/tahaotc](https://linkedin.com/in/tahaotc)
