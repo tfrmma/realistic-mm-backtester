@@ -95,7 +95,7 @@ class InventoryState:
     realized_pnl: float = 0.0
     fees_paid: float = 0.0
 
-    def apply_fill(self, fill: Fill, fee_rate: float = 0.0) -> None:
+    def apply_fill(self, fill: Fill, fee_rate_maker: float = 0.0, fee_rate_taker: float = 0.0) -> None:
         sign = 1.0 if fill.side == Side.BUY else -1.0
         notional = fill.price * fill.size
 
@@ -111,8 +111,11 @@ class InventoryState:
                 self.avg_entry = fill.price
 
         self.position += sign * fill.size
-        fee = notional * fee_rate
-        self.fees_paid += -fee if fill.is_maker else fee
+        # each rate is applied as given no implicit sign-flip for maker.
+        # Pass a negative fee_rate_maker yourself if your venue pays rebates;
+        # ExchangeMetadata.fee_rate_maker/fee_rate_taker map straight through.
+        rate = fee_rate_maker if fill.is_maker else fee_rate_taker
+        self.fees_paid += notional * rate
 
     def unrealized_pnl(self, mid: float) -> float:
         if self.position == 0.0:
