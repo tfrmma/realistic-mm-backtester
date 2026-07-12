@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from mmbt.core.types import Fill, Order, OrderBook, Side, Trade
-from mmbt.queue.cancel_models import CancelModel, ReduceRatioCancelModel
+from mmbt.queue.cancel_models import CancelModel, ProbQueueCancelModel, ReduceRatioCancelModel
 
 try:
     from mmbt._core import FIFOQueueCore as _RustCore
@@ -11,6 +11,25 @@ try:
 except ImportError:
     _RustCore = None       # type: ignore[assignment,misc]
     RUST_AVAILABLE = False
+
+
+def _build_rust_core(cancel_model: CancelModel) -> object | None:
+    """
+    Map a Python CancelModel to the matching Rust constructor call. Returns
+    None for anything the Rust core doesn't know how to represent (a custom
+    user CancelModel subclass) caller falls back to the pure-Python path.
+
+    Previously this always built a ReduceRatio core via
+    `getattr(cancel_model, 'cancel_ratio', 0.20)`, so passing a
+    ProbQueueCancelModel with use_rust=True silently ran a *fixed* 0.20 ratio
+    in Rust instead -- same object, wrong model, no warning. Fixed here by
+    checking the concrete type instead of duck-typing a single attribute.
+    """
+    if isinstance(cancel_model, ProbQueueCancelModel):
+        return _RustCore(min_ratio=cancel_model.min_ratio, max_ratio=cancel_model.max_ratio)
+    if isinstance(cancel_model, ReduceRatioCancelModel):
+        return _RustCore(cancel_ratio=cancel_model.cancel_ratio)
+    return None
 
 
 @dataclass
@@ -65,8 +84,11 @@ class FIFOQueueState:
 class FIFOQueueSimulator:
     """
     Manages queue positions for all resting orders.
-    Uses Rust extension when available, pure Python otherwise.
-    Check .using_rust to see which path is active.
+    Uses Rust extension when available AND the cancel_model is one Rust knows
+    how to represent (ReduceRatioCancelModel or ProbQueueCancelModel) —
+    a custom CancelModel subclass falls back to pure Python automatically,
+    since Rust can't call back into arbitrary Python cancellation logic.
+    Check .using_rust to see which path is actually active.
     Build extension: maturin develop --release
     """
 
@@ -77,9 +99,9 @@ class FIFOQueueSimulator:
     ) -> None:
         self._cancel_model = cancel_model or ReduceRatioCancelModel()
 
-        if use_rust and RUST_AVAILABLE:
-            cr = getattr(cancel_model, 'cancel_ratio', 0.20)
-            self._core: object | None = _RustCore(cancel_ratio=cr)
+        core = _build_rust_core(self._cancel_model) if (use_rust and RUST_AVAILABLE) else None
+        if core is not None:
+            self._core: object | None = core
             self._order_cache: dict[str, Order] = {}
         else:
             self._core = None
