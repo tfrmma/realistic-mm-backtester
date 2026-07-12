@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from mmbt.core.types import Fill, Side
+from mmbt.reporting.mid_history import MidHistoryBuffer
 
 
 @dataclass(slots=True)
@@ -33,10 +34,13 @@ class StrategyMetrics:
     fills: list[Fill] = field(default_factory=list)
     fill_records: list[FillRecord] = field(default_factory=list)
     equity_snapshots: list[EquitySnapshot] = field(default_factory=list)
-    # every tick, growing unbounded. disable for >10M ticks, you've been warned
-    mid_history: list[tuple[float, float]] = field(default_factory=list)
+    mid_history_capacity: int = 200_000
+    mid_history: MidHistoryBuffer = field(init=False, repr=False)
     realized_pnl: float = 0.0
     fees_paid: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.mid_history = MidHistoryBuffer(self.mid_history_capacity)
 
     def net_pnl(self) -> float:
         return self.realized_pnl - self.fees_paid
@@ -75,11 +79,11 @@ class BacktestReport:
         metrics: StrategyMetrics,
         lookback_ticks: int = 10,
     ) -> BacktestReport:
-        equity_vals = [s.equity for s in metrics.equity_snapshots]
-        ts_list     = [ts for ts, _ in metrics.mid_history]
-        mid_list    = [m for _, m in metrics.mid_history]
-        scores      = _adverse_scores(metrics.fill_records, ts_list, mid_list, lookback_ticks)
-        n           = len(scores)
+        equity_vals  = [s.equity for s in metrics.equity_snapshots]
+        ts_arr, mid_arr = metrics.mid_history.to_arrays()
+        ts_list, mid_list = ts_arr.tolist(), mid_arr.tolist()
+        scores       = _adverse_scores(metrics.fill_records, ts_list, mid_list, lookback_ticks)
+        n            = len(scores)
         return cls(
             metrics=metrics,
             sharpe=_sharpe(equity_vals),
@@ -143,7 +147,16 @@ def _adverse_scores(
     lookback_ticks: int,
 ) -> list[float]:
     scores: list[float] = []
+    if not ts_list:
+        return scores
+    earliest = ts_list[0]
     for fr in fill_records:
+        if fr.fill.ts < earliest:
+            # fill predates the retained mid_history window with a bounded
+            # MidHistoryBuffer this happens once the buffer has wrapped past
+            # it. bisect would otherwise silently return index 0 here (not
+            # "not found"), scoring the fill against the wrong mid entirely.
+            continue
         idx = bisect.bisect_left(ts_list, fr.fill.ts)
         fi  = idx + lookback_ticks
         if fi >= len(mid_list):
