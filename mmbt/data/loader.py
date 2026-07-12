@@ -10,6 +10,26 @@ _REQUIRED = {"ts", "bid_px", "bid_sz", "ask_px", "ask_sz"}
 _TRADE    = {"trade_px", "trade_sz", "trade_side"}
 
 
+def _level_columns(columns: set[str], prefix: str) -> list[tuple[str, str]]:
+    """
+    Ordered (price_col, size_col) pairs for one side of the book, best level
+    first. `{prefix}_px`/`{prefix}_sz` (no suffix) is level 1 -- kept bare for
+    backward compatibility with single-level CSVs. Deeper levels are
+    `{prefix}_px_2`/`{prefix}_sz_2`, `{prefix}_px_3`/`{prefix}_sz_3`, etc.,
+    picked up in order until a number is missing. Provide as many as your
+    data has (5-10 is typical for real queue simulation) -- one level still
+    works exactly like before.
+    """
+    pairs: list[tuple[str, str]] = []
+    if f"{prefix}_px" in columns and f"{prefix}_sz" in columns:
+        pairs.append((f"{prefix}_px", f"{prefix}_sz"))
+    n = 2
+    while f"{prefix}_px_{n}" in columns and f"{prefix}_sz_{n}" in columns:
+        pairs.append((f"{prefix}_px_{n}", f"{prefix}_sz_{n}"))
+        n += 1
+    return pairs
+
+
 class TickLoader:
     """
     Lazy tick iterator. Wraps any source — CSV, Parquet, synthetic.
@@ -54,12 +74,17 @@ def _csv_iter(path: Path, symbol: str, chunk_size: int) -> Iterator[MarketTick]:
     except ImportError:
         raise ImportError("pandas required: pip install mmbt[dev]")
 
+    bid_cols: list[tuple[str, str]] | None = None
+    ask_cols: list[tuple[str, str]] | None = None
     for chunk in pd.read_csv(path, chunksize=chunk_size):
         missing = _REQUIRED - set(chunk.columns)
         if missing:
             raise ValueError(f"CSV missing columns: {missing}")
+        if bid_cols is None:  # column set is stable across chunks of one file
+            bid_cols = _level_columns(set(chunk.columns), "bid")
+            ask_cols = _level_columns(set(chunk.columns), "ask")
         for _, row in chunk.iterrows():
-            yield _row_to_tick(row, symbol)
+            yield _row_to_tick(row, symbol, bid_cols, ask_cols)
 
 
 def _parquet_iter(path: Path, symbol: str) -> Iterator[MarketTick]:
@@ -73,11 +98,18 @@ def _parquet_iter(path: Path, symbol: str) -> Iterator[MarketTick]:
     missing = _REQUIRED - set(df.columns)
     if missing:
         raise ValueError(f"Parquet missing columns: {missing}")
+    bid_cols = _level_columns(set(df.columns), "bid")
+    ask_cols = _level_columns(set(df.columns), "ask")
     for _, row in df.iterrows():
-        yield _row_to_tick(row, symbol)
+        yield _row_to_tick(row, symbol, bid_cols, ask_cols)
 
 
-def _row_to_tick(row: object, symbol: str) -> MarketTick:
+def _row_to_tick(
+    row: object,
+    symbol: str,
+    bid_cols: list[tuple[str, str]],
+    ask_cols: list[tuple[str, str]],
+) -> MarketTick:
     try:
         import pandas as pd
     except ImportError:
@@ -85,8 +117,8 @@ def _row_to_tick(row: object, symbol: str) -> MarketTick:
 
     ts   = float(row["ts"])
     book = OrderBook(
-        bids=[BookLevel(float(row["bid_px"]), float(row["bid_sz"]))],
-        asks=[BookLevel(float(row["ask_px"]), float(row["ask_sz"]))],
+        bids=_levels(row, bid_cols, pd),
+        asks=_levels(row, ask_cols, pd),
         ts=ts,
     )
     trades: list[Trade] = []
@@ -102,3 +134,17 @@ def _row_to_tick(row: object, symbol: str) -> MarketTick:
             is_liquidation=bool(row.get("is_liquidation", False)),
         ))
     return MarketTick(book=book, trades=trades, ts=ts)
+
+
+def _levels(row: object, cols: list[tuple[str, str]], pd) -> list[BookLevel]:
+    # stop at the first missing/NaN level -- a shallower book on some rows
+    # (thin period, exchange only sent N levels that tick) is normal, not an error
+    levels: list[BookLevel] = []
+    for px_col, sz_col in cols:
+        px, sz = row[px_col], row[sz_col]
+        if pd.isna(px) or pd.isna(sz):
+            break
+        levels.append(BookLevel(float(px), float(sz)))
+    if not levels:
+        raise ValueError(f"no valid book levels found in columns {cols}")
+    return levels
