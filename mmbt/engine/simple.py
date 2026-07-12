@@ -33,11 +33,13 @@ class BacktestEngine:
         risk: RiskManager | None = None,
         fee_rate: float = 0.0,
         snapshot_every: int = 100,
+        mid_history_capacity: int = 200_000,
     ) -> None:
         self._fill_sim      = fill_sim or PassiveFillSimulator()
         self._risk          = risk or NullRiskManager()
         self._fee_rate      = fee_rate
         self._snapshot_every = snapshot_every
+        self._mid_history_capacity = mid_history_capacity
         self._strats: dict[str, _StratState] = {}
 
     def add_strategy(self, name: str, strategy: Strategy, symbol: str) -> None:
@@ -46,7 +48,7 @@ class BacktestEngine:
         self._strats[name] = _StratState(
             strategy=strategy,
             inventory=InventoryState(symbol=symbol),
-            metrics=StrategyMetrics(symbol=symbol),
+            metrics=StrategyMetrics(symbol=symbol, mid_history_capacity=self._mid_history_capacity),
             snapshot_every=self._snapshot_every,
         )
 
@@ -102,7 +104,7 @@ class BacktestEngine:
         #
         # PassiveFillSimulator.simulate() can return a fill smaller than
         # order.size (a partial fill, e.g. pro-rata share of a level's depth).
-        # Only drop the order once it's fully exhausted the remainder keeps
+        # Only drop the order once it's fully exhausted -- the remainder keeps
         # resting at the same price/order_id and can catch further fills on
         # later ticks, same as a real passive order would.
         #
