@@ -19,7 +19,8 @@ def main() -> None:
         latency_config=lat,
         cancel_model=ReduceRatioCancelModel(cancel_ratio=0.15),
         risk=MaxInventoryRiskManager(max_position=5.0),
-        fee_rate=0.0001,
+        fee_rate_maker=0.0001,
+        fee_rate_taker=0.0005,
         snapshot_every=50,
         seed=42,
     )
