@@ -4,12 +4,13 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from mmbt.core.protocol import RiskManager, Strategy
-from mmbt.core.types import CancelOrder, InventoryState, MarketTick, Order, OrderBook
+from mmbt.core.types import CancelOrder, Fill, InventoryState, MarketTick, Order, OrderBook
 from mmbt.latency.book_history import BookHistory
 from mmbt.latency.config import LatencyConfig
 from mmbt.latency.simulator import LatencySimulator
 from mmbt.queue.cancel_models import CancelModel, ReduceRatioCancelModel
 from mmbt.queue.fifo import FIFOQueueSimulator
+from mmbt.queue.taker import crosses_book, sweep_book
 from mmbt.reporting.metrics import EquitySnapshot, FillRecord, StrategyMetrics
 from mmbt.risk.base import NullRiskManager
 
@@ -23,6 +24,11 @@ class _StratState:
     metrics: StrategyMetrics
     book_history: BookHistory
     snapshot_every: int = 100
+    # order_id -> ts when the order actually landed in the queue (for
+    # queue_displacement_us). order_id -> cancel's expected arrival ts, while
+    # that cancel is still in flight (removed once it lands or the order fills)
+    order_register_ts: dict[str, float] = field(default_factory=dict, repr=False)
+    pending_cancels: dict[str, float] = field(default_factory=dict, repr=False)
     _tick_count: int = field(default=0, repr=False, init=False)
 
 
@@ -31,9 +37,11 @@ class ProBacktestEngine:
     FIFO queue + latency simulation. This is the one you trust.
 
     Tick flow:
-      1. Land pending orders/cancels (latency sim)
-      2. FIFO queue processes tick -> fills (against the TRUE current book —
-         fills always reflect what actually happened on the exchange)
+      1. Land pending orders/cancels (latency sim). A landing order that
+         crosses the true book executes immediately as a taker fill (or gets
+         rejected if is_post_only) instead of joining the FIFO queue.
+      2. FIFO queue processes tick -> maker fills (against the TRUE current
+         book — fills always reflect what actually happened on the exchange)
       3. Strategy on_tick, fed a book/trades snapshot delayed by a sampled
          feed_us (ring buffer of recent ticks, see latency/book_history.py) —
          the strategy decides based on what it *would* have seen, not the
@@ -49,7 +57,8 @@ class ProBacktestEngine:
         latency_config: LatencyConfig | None = None,
         cancel_model: CancelModel | None = None,
         risk: RiskManager | None = None,
-        fee_rate: float = 0.0,
+        fee_rate_maker: float = 0.0,
+        fee_rate_taker: float = 0.0,
         snapshot_every: int = 100,
         seed: int | None = None,
         book_history_size: int = 2_000,
@@ -58,7 +67,8 @@ class ProBacktestEngine:
         self._lat_cfg          = latency_config or LatencyConfig()
         self._cancel_model     = cancel_model or ReduceRatioCancelModel()
         self._risk             = risk or NullRiskManager()
-        self._fee_rate         = fee_rate
+        self._fee_rate_maker   = fee_rate_maker
+        self._fee_rate_taker   = fee_rate_taker
         self._snapshot_every   = snapshot_every
         self._seed             = seed
         self._book_history_size    = book_history_size
@@ -94,12 +104,15 @@ class ProBacktestEngine:
         self._land_pending(state, ts, book)
 
         for fill in state.queue_sim.process_tick(book, trades):
-            state.inventory.apply_fill(fill, self._fee_rate)
-            state.strategy.on_fill(fill)
-            state.metrics.fills.append(fill)
-            state.metrics.fill_records.append(FillRecord(fill=fill, mid_at_fill=book.mid))
-            state.metrics.realized_pnl = state.inventory.realized_pnl
-            state.metrics.fees_paid    = state.inventory.fees_paid
+            if fill.order_id in state.pending_cancels:
+                # a cancel was in flight for this order but the fill beat it
+                # to the exchange, how much queue time had the order already
+                # accumulated by the time our (too-late) cancel would have landed
+                register_ts = state.order_register_ts.get(fill.order_id, fill.ts)
+                fill.queue_displacement_us = state.pending_cancels[fill.order_id] - register_ts
+                del state.pending_cancels[fill.order_id]
+            state.order_register_ts.pop(fill.order_id, None)
+            self._record_fill(state, fill, book)
 
         state.metrics.mid_history.append((ts, book.mid))
 
@@ -114,7 +127,7 @@ class ProBacktestEngine:
             ))
 
         # true tick goes into the ring buffer first, then the strategy is fed
-        # whatever it would actually have received feed_us later fills above
+        # whatever it would actually have received feed_us later, fills above
         # already happened against the TRUE book, only the strategy's view is stale
         state.book_history.push(ts, book, trades)
         feed_delay   = state.latency_sim.feed_delay_us()
@@ -129,11 +142,43 @@ class ProBacktestEngine:
             order.ts = ts
             state.latency_sim.submit_order(order, ts)
         for cancel in [a for a in actions if isinstance(a, CancelOrder)]:
-            state.latency_sim.submit_cancel(cancel, ts)
+            arrive_ts = state.latency_sim.submit_cancel(cancel, ts)
+            state.pending_cancels[cancel.order_id] = arrive_ts
 
     def _land_pending(self, state: _StratState, ts: float, book: OrderBook) -> None:
         for kind, payload in state.latency_sim.poll_arrived(ts):
             if kind == "order":
-                state.queue_sim.register(payload, book)
+                self._land_order(state, payload, ts, book)
             elif kind == "cancel":
                 state.queue_sim.cancel(payload.order_id)
+                state.pending_cancels.pop(payload.order_id, None)
+                state.order_register_ts.pop(payload.order_id, None)
+
+    def _land_order(self, state: _StratState, order: Order, ts: float, book: OrderBook) -> None:
+        # evaluated against the TRUE book at landing time, not whatever the
+        # strategy saw when it decided to submit, latency can turn a resting
+        # order into a crossing one (or vice versa) by the time it arrives
+        if not crosses_book(order, book):
+            state.queue_sim.register(order, book)
+            state.order_register_ts[order.order_id] = ts
+            return
+        if order.is_post_only:
+            state.metrics.rejected_orders += 1
+            return
+        execution = sweep_book(order, book)
+        if execution is None:
+            return  # crossed on paper but the crossed side had no real depth
+        self._record_fill(state, Fill(
+            order_id=order.order_id, symbol=order.symbol, side=order.side,
+            price=execution.vwap_price, size=execution.filled_size,
+            is_maker=False, ts=ts,
+        ), book)
+        # any unfilled remainder does NOT rest IOC semantics, like a real taker order
+
+    def _record_fill(self, state: _StratState, fill: Fill, book: OrderBook) -> None:
+        state.inventory.apply_fill(fill, self._fee_rate_maker, self._fee_rate_taker)
+        state.strategy.on_fill(fill)
+        state.metrics.fills.append(fill)
+        state.metrics.fill_records.append(FillRecord(fill=fill, mid_at_fill=book.mid))
+        state.metrics.realized_pnl = state.inventory.realized_pnl
+        state.metrics.fees_paid    = state.inventory.fees_paid
