@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev  = ["pytest>=7.4", "matplotlib>=3.8", "plotly>=5.18", "pandas>=2.0"]
+dev  = ["pytest>=7.4", "matplotlib>=3.8", "plotly>=5.18", "pandas>=2.0", "pyarrow>=14.0"]
 rust = ["maturin>=1.4"]   # needed to compile mmbt._core
 
 [tool.setuptools.packages.find]
@@ -42,8 +42,11 @@ python_files = ["test_*.py"]
 line-length    = 100
 target-version = "py311"
 
-# ── maturin config (activate when switching build backend) ────────────────────
-# [tool.maturin]
-# python-source = "."
-# module-name   = "mmbt._core"
-# features      = ["pyo3/extension-module"]
+# ── maturin config (activates when running the maturin CLI directly, e.g.
+#    `maturin develop --release` / `maturin build`, regardless of the
+#    [build-system] backend above -- that block only governs plain `pip
+#    install .`) ────────────────────────────────────────────────────────────
+[tool.maturin]
+python-source = "."
+module-name   = "mmbt._core"
+features      = ["pyo3/extension-module"]
