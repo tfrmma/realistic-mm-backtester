@@ -18,7 +18,7 @@ def _engine() -> ProBacktestEngine:
     return ProBacktestEngine(
         latency_config=LatencyConfig(order_us=400.0, cancel_us=250.0, jitter=0.15),
         cancel_model=ReduceRatioCancelModel(0.15),
-        fee_rate=0.0001, snapshot_every=500, seed=42,
+        fee_rate_maker=0.0001, fee_rate_taker=0.0005, snapshot_every=500, seed=42,
     )
 
 
