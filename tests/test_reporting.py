@@ -79,6 +79,30 @@ class TestBacktestReport:
         assert "mmbt backtest" in capsys.readouterr().out
 
 
+class TestMidHistoryCapacityInReport:
+    def test_fill_within_retained_window_still_scored(self):
+        m = StrategyMetrics(symbol="X", mid_history_capacity=15)
+        f = _fill(Side.BUY, 100.0, ts=10_000.0)  # near the end -> still in the retained window
+        m.fills.append(f)
+        m.fill_records.append(FillRecord(fill=f, mid_at_fill=100.0))
+        for i in range(20):  # exceeds capacity=15 -> the buffer wraps
+            m.mid_history.append((float(i * 1000), 100.0))
+            m.equity_snapshots.append(_snap(float(i * 1000), 0.0))
+        report = BacktestReport.from_metrics(m, lookback_ticks=3)
+        assert len(report.adverse_scores) == 1
+
+    def test_fill_evicted_by_wraparound_is_silently_skipped_not_an_error(self):
+        m = StrategyMetrics(symbol="X", mid_history_capacity=5)
+        f = _fill(Side.BUY, 100.0, ts=0.0)  # tick 0 -- will be evicted once buffer wraps
+        m.fills.append(f)
+        m.fill_records.append(FillRecord(fill=f, mid_at_fill=100.0))
+        for i in range(50):  # way past capacity=5, tick 0's mid point is long gone
+            m.mid_history.append((float(i * 1000), 100.0))
+            m.equity_snapshots.append(_snap(float(i * 1000), 0.0))
+        report = BacktestReport.from_metrics(m, lookback_ticks=3)
+        assert report.adverse_scores == []  # no crash, just nothing to score
+
+
 class TestAdverseSelectionSign:
     def _report(self, side: Side, mid_at: float, mid_after: float) -> BacktestReport:
         m = StrategyMetrics(symbol="X")
