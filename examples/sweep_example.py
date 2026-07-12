@@ -22,7 +22,8 @@ from examples.strategies.symmetric_mm import SymmetricMM
 def run_symmetric_mm(params: dict, ticks: list[MarketTick]) -> StrategyMetrics:
     engine = ProBacktestEngine(
         latency_config=LatencyConfig(order_us=params.get("order_us", 450.0)),
-        fee_rate=0.0001,
+        fee_rate_maker=0.0001,
+        fee_rate_taker=0.0005,
         snapshot_every=50,
     )
     strat = SymmetricMM(
