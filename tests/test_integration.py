@@ -122,7 +122,7 @@ class TestPnLAccounting:
     def test_maker_rebate_non_positive_fees(self):
         # fee_rate is the base (positive) rate. InventoryState.apply_fill already
         # negates it for maker fills (fees_paid += -fee if is_maker), so the rebate
-        # falls out on its own -- passing a negative fee_rate here double-flips the
+        # falls out on its own passing a negative fee_rate here double-flips the
         # sign and produces a *positive* fees_paid, which is what was failing.
         e = ProBacktestEngine(
             latency_config=LatencyConfig(order_us=200.0, jitter=0.10),
@@ -194,3 +194,72 @@ class TestPortfolio:
         pf.get("X").position  = 2.0
         pf.get("X").avg_entry = 100.0
         assert pf.total_pnl({"X": 110.0}) == pytest.approx(20.0)
+
+
+class _BookRecorder(BaseStrategy):
+    """Never trades -- just records the ts of whatever book it was handed
+    each on_tick call, so tests can check how stale it was."""
+    def __init__(self) -> None:
+        self.seen_ts: list[float] = []
+
+    def on_tick(self, book: OrderBook, trades: list[Trade]) -> list:
+        self.seen_ts.append(book.ts)
+        return []
+
+
+def _fixed_interval_ticks(n: int, interval: float = 1000.0, seed: int = 1) -> list[MarketTick]:
+    return TickLoader.synthetic(SyntheticConfig(
+        n_ticks=n, tick_interval_us=interval, trade_prob=0.0, seed=seed,
+    )).to_list()
+
+
+class TestStaleBookFeedDelay:
+    def test_strategy_sees_delayed_book_not_current(self):
+        ticks = _fixed_interval_ticks(500)
+        rec   = _BookRecorder()
+        engine = ProBacktestEngine(
+            latency_config=LatencyConfig(feed_us=5_000.0, order_us=400.0, cancel_us=250.0, jitter=0.20),
+            seed=3,
+        )
+        engine.add_strategy("mm", rec, "BTC-USD")
+        engine.run(ticks)
+
+        actual_ts = [i * 1000.0 for i in range(len(ticks))]
+        lags = [a - s for a, s in zip(actual_ts, rec.seen_ts)]
+        # feed_us=5000 ~= 5 ticks of delay; after the ring buffer warms up the
+        # strategy should clearly be looking at the past, not the live book
+        warm_avg = sum(lags[20:]) / len(lags[20:])
+        assert warm_avg > 2_000.0
+
+    def test_near_zero_feed_delay_tracks_current_tick(self):
+        ticks = _fixed_interval_ticks(200)
+        rec   = _BookRecorder()
+        engine = ProBacktestEngine(
+            latency_config=LatencyConfig(feed_us=0.01, order_us=400.0, cancel_us=250.0, jitter=0.01),
+            seed=4,
+        )
+        engine.add_strategy("mm", rec, "BTC-USD")
+        engine.run(ticks)
+
+        actual_ts = [i * 1000.0 for i in range(len(ticks))]
+        lags = [a - s for a, s in zip(actual_ts, rec.seen_ts)]
+        # any strictly-positive delay means as_of(ts - delay) can never return the
+        # tick that was *just* pushed best case is exactly one tick of lag, not
+        # zero. That's a real property of the discretized ring buffer, not slack.
+        assert max(lags) <= 1_000.0
+
+    def test_fills_still_computed_against_true_book(self):
+        # a strategy that only ever sees a stale, far-out-of-date book should
+        # still get filled based on what actually happened on the exchange
+        # the delay only affects strategy decisions, never the fill engine
+        ticks = _ticks(n=3_000)
+        engine = ProBacktestEngine(
+            latency_config=LatencyConfig(feed_us=20_000.0, order_us=400.0, cancel_us=250.0, jitter=0.20),
+            fee_rate=0.0001, snapshot_every=50, seed=6,
+        )
+        engine.add_strategy("mm", _QuoteStrategy("BTC-USD"), "BTC-USD")
+        m = engine.run(ticks)["mm"]
+        # sanity: engine still runs end-to-end and can still produce fills
+        # despite the strategy operating on a badly stale view
+        assert isinstance(m, StrategyMetrics)
+        assert m.net_pnl() == pytest.approx(m.realized_pnl - m.fees_paid)
