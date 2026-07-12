@@ -16,8 +16,8 @@ class Portfolio:
             self._positions[symbol] = InventoryState(symbol=symbol)
         return self._positions[symbol]
 
-    def apply_fill(self, fill: Fill, fee_rate: float = 0.0) -> None:
-        self.get(fill.symbol).apply_fill(fill, fee_rate)
+    def apply_fill(self, fill: Fill, fee_rate_maker: float = 0.0, fee_rate_taker: float = 0.0) -> None:
+        self.get(fill.symbol).apply_fill(fill, fee_rate_maker, fee_rate_taker)
 
     def total_realized_pnl(self) -> float:
         return sum(inv.realized_pnl for inv in self._positions.values())
