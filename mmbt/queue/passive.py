@@ -10,6 +10,11 @@ class PassiveFillSimulator:
     """
     Fills if a trade crosses our price. Size is pro-rata share of level depth.
     fill_ratio is a conservative discount, 0.5 works well in practice.
+
+    The returned Fill.size can be smaller than order.size (a partial fill) --
+    this simulator doesn't track order state across calls, so it's on the
+    caller (BacktestEngine._try_fill) to keep a partially-filled order resting
+    for the next tick instead of dropping it once *any* fill comes back.
     """
 
     def __init__(self, fill_ratio: float = 0.5) -> None:
