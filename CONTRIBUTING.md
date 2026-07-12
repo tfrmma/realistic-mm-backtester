@@ -1,12 +1,12 @@
 # Contributing
 
-Contributions welcome. This is a focused repo — new features should serve
+Contributions welcome. This is a focused repo, new features should serve
 the core goal of realistic market making simulation.
 
 ## Setup
 
 ```bash
-git clone https://github.com/tfrmma/realistic-mm-backtester
+git clone https://github.com/tfrmma/realistic-mm-backtester.git
 cd mmbt
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
@@ -52,7 +52,7 @@ class MyExchange:
         ...
 ```
 
-No inheritance required — duck typing via `Protocol`. Drop a file in `mmbt/data/`
+No inheritance required, duck typing via `Protocol`. Drop a file in `mmbt/data/`
 and open a PR.
 
 ## Adding a cancel model
@@ -73,7 +73,7 @@ Add it to `mmbt/queue/cancel_models.py` with a calibration note.
 - Queue simulation improvements (better iceberg detection, pro-rata fill models)
 - New exchange adapters
 - Reporting improvements (new plot types, HTML export)
-- Performance (Rust hot path via PyO3 — see S5 roadmap)
+- Performance (Rust hot path via PyO3, see S5 roadmap)
 
 ## What doesn't belong here
 
