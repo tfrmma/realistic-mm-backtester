@@ -38,6 +38,7 @@ class StrategyMetrics:
     mid_history: MidHistoryBuffer = field(init=False, repr=False)
     realized_pnl: float = 0.0
     fees_paid: float = 0.0
+    rejected_orders: int = 0  # post-only orders that would have crossed the book
 
     def __post_init__(self) -> None:
         self.mid_history = MidHistoryBuffer(self.mid_history_capacity)
@@ -49,9 +50,18 @@ class StrategyMetrics:
         maker = [f.qty_in_front for f in self.fills if f.is_maker]
         return float(np.mean(maker)) if maker else 0.0
 
+    def n_maker_fills(self) -> int:
+        return sum(1 for f in self.fills if f.is_maker)
+
+    def n_taker_fills(self) -> int:
+        return sum(1 for f in self.fills if not f.is_maker)
+
     def summary(self) -> dict:
         return {
             "n_fills":          len(self.fills),
+            "n_maker_fills":    self.n_maker_fills(),
+            "n_taker_fills":    self.n_taker_fills(),
+            "rejected_orders":  self.rejected_orders,
             "realized_pnl":     round(self.realized_pnl, 8),
             "fees_paid":        round(self.fees_paid, 8),
             "net_pnl":          round(self.net_pnl(), 8),
@@ -99,7 +109,8 @@ class BacktestReport:
         print(f"  mmbt backtest -- {m.symbol or 'unknown'}")
         print(sep)
         rows = [
-            ("fills",            len(m.fills)),
+            ("fills",            f"{len(m.fills)}  (maker={m.n_maker_fills()}, taker={m.n_taker_fills()})"),
+            ("rejected orders",  m.rejected_orders),
             ("realized pnl",     f"{m.realized_pnl:.8f}"),
             ("fees paid",        f"{m.fees_paid:.8f}"),
             ("net pnl",          f"{m.net_pnl():.8f}"),
@@ -124,7 +135,7 @@ def _sharpe(equity_vals: list[float]) -> float:
     if std < 1e-12:
         # zero variance: flat equity -> no signal either way (0.0). Constant
         # *positive* (or negative) step size is a degenerate "no risk" case,
-        # not an undefined one -- floor the denominator instead of collapsing
+        # not an undefined one floor the denominator instead of collapsing
         # a real directional signal to 0.0.
         return 0.0 if abs(mean) < 1e-12 else mean / 1e-12
     return mean / std
@@ -152,7 +163,7 @@ def _adverse_scores(
     earliest = ts_list[0]
     for fr in fill_records:
         if fr.fill.ts < earliest:
-            # fill predates the retained mid_history window with a bounded
+            # fill predates the retained mid_history window, with a bounded
             # MidHistoryBuffer this happens once the buffer has wrapped past
             # it. bisect would otherwise silently return index 0 here (not
             # "not found"), scoring the fill against the wrong mid entirely.
