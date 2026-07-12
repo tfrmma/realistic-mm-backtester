@@ -64,7 +64,7 @@ def _pro(seed: int = 0) -> ProBacktestEngine:
     return ProBacktestEngine(
         latency_config=LatencyConfig(order_us=400.0, cancel_us=250.0, jitter=0.15),
         cancel_model=ReduceRatioCancelModel(0.15),
-        fee_rate=0.0001, snapshot_every=50, seed=seed,
+        fee_rate_maker=0.0001, fee_rate_taker=0.0005, snapshot_every=50, seed=seed,
     )
 
 
@@ -94,7 +94,7 @@ class TestDeterminism:
             return ProBacktestEngine(
                 latency_config=LatencyConfig(order_us=1200.0, cancel_us=900.0, jitter=0.35),
                 cancel_model=ReduceRatioCancelModel(0.15),
-                fee_rate=0.0001, snapshot_every=50, seed=seed,
+                fee_rate_maker=0.0001, fee_rate_taker=0.0005, snapshot_every=50, seed=seed,
             )
 
         e1 = _wide_latency_pro(seed=1); e1.add_strategy("mm", _QuoteStrategy("BTC-USD"), "BTC-USD")
@@ -120,13 +120,13 @@ class TestPnLAccounting:
         assert m.realized_pnl == pytest.approx(0.0)
 
     def test_maker_rebate_non_positive_fees(self):
-        # fee_rate is the base (positive) rate. InventoryState.apply_fill already
-        # negates it for maker fills (fees_paid += -fee if is_maker), so the rebate
-        # falls out on its own passing a negative fee_rate here double-flips the
-        # sign and produces a *positive* fees_paid, which is what was failing.
+        # fee_rate_maker/fee_rate_taker are applied exactly as given now, no
+        # implicit sign-flip for makers -- so a real rebate means passing a
+        # negative fee_rate_maker explicitly, same as ExchangeMetadata would
+        # for a venue that pays makers.
         e = ProBacktestEngine(
             latency_config=LatencyConfig(order_us=200.0, jitter=0.10),
-            fee_rate=0.0001, snapshot_every=50, seed=99,
+            fee_rate_maker=-0.0001, fee_rate_taker=0.0005, snapshot_every=50, seed=99,
         )
         e.add_strategy("mm", _QuoteStrategy("BTC-USD"), "BTC-USD")
         m = e.run(_ticks(n=5_000))["mm"]
@@ -137,7 +137,7 @@ class TestPnLAccounting:
 class TestEngineComparison:
     def test_simple_fills_at_least_as_much(self):
         ticks = _ticks(n=3_000)
-        se = BacktestEngine(fee_rate=0.0001, snapshot_every=50)
+        se = BacktestEngine(fee_rate_maker=0.0001, fee_rate_taker=0.0005, snapshot_every=50)
         se.add_strategy("mm", _QuoteStrategy("BTC-USD"), "BTC-USD")
         sm = se.run(ticks)["mm"]
         pe = _pro(seed=0); pe.add_strategy("mm", _QuoteStrategy("BTC-USD"), "BTC-USD")
@@ -255,7 +255,7 @@ class TestStaleBookFeedDelay:
         ticks = _ticks(n=3_000)
         engine = ProBacktestEngine(
             latency_config=LatencyConfig(feed_us=20_000.0, order_us=400.0, cancel_us=250.0, jitter=0.20),
-            fee_rate=0.0001, snapshot_every=50, seed=6,
+            fee_rate_maker=0.0001, fee_rate_taker=0.0005, snapshot_every=50, seed=6,
         )
         engine.add_strategy("mm", _QuoteStrategy("BTC-USD"), "BTC-USD")
         m = engine.run(ticks)["mm"]
