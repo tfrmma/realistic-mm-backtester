@@ -41,9 +41,9 @@ class ProBacktestEngine:
          crosses the true book executes immediately as a taker fill (or gets
          rejected if is_post_only) instead of joining the FIFO queue.
       2. FIFO queue processes tick -> maker fills (against the TRUE current
-         book — fills always reflect what actually happened on the exchange)
+         book fills always reflect what actually happened on the exchange)
       3. Strategy on_tick, fed a book/trades snapshot delayed by a sampled
-         feed_us (ring buffer of recent ticks, see latency/book_history.py) —
+         feed_us (ring buffer of recent ticks, see latency/book_history.py)
          the strategy decides based on what it *would* have seen, not the
          current tick
       4. Risk check -> latency sim for next arrival
@@ -94,6 +94,10 @@ class ProBacktestEngine:
         for tick in ticks:
             for state in self._strats.values():
                 self._step(state, tick)
+        for state in self._strats.values():
+            state.metrics.order_latencies_us  = state.latency_sim.order_latencies
+            state.metrics.cancel_latencies_us = state.latency_sim.cancel_latencies
+            state.metrics.latency_config      = self._lat_cfg
         return {name: s.metrics for name, s in self._strats.items()}
 
     def _step(self, state: _StratState, tick: MarketTick) -> None:
@@ -106,7 +110,7 @@ class ProBacktestEngine:
         for fill in state.queue_sim.process_tick(book, trades):
             if fill.order_id in state.pending_cancels:
                 # a cancel was in flight for this order but the fill beat it
-                # to the exchange, how much queue time had the order already
+                # to the exchange how much queue time had the order already
                 # accumulated by the time our (too-late) cancel would have landed
                 register_ts = state.order_register_ts.get(fill.order_id, fill.ts)
                 fill.queue_displacement_us = state.pending_cancels[fill.order_id] - register_ts
@@ -127,7 +131,7 @@ class ProBacktestEngine:
             ))
 
         # true tick goes into the ring buffer first, then the strategy is fed
-        # whatever it would actually have received feed_us later, fills above
+        # whatever it would actually have received feed_us later fills above
         # already happened against the TRUE book, only the strategy's view is stale
         state.book_history.push(ts, book, trades)
         feed_delay   = state.latency_sim.feed_delay_us()
@@ -156,7 +160,7 @@ class ProBacktestEngine:
 
     def _land_order(self, state: _StratState, order: Order, ts: float, book: OrderBook) -> None:
         # evaluated against the TRUE book at landing time, not whatever the
-        # strategy saw when it decided to submit, latency can turn a resting
+        # strategy saw when it decided to submit latency can turn a resting
         # order into a crossing one (or vice versa) by the time it arrives
         if not crosses_book(order, book):
             state.queue_sim.register(order, book)
