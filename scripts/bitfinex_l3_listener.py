@@ -39,11 +39,8 @@ Requires:
     pip install websockets pyarrow
 
 Usage:
-    python bitfinex_l3_listener.py --symbols tBTCUSD,tETHUSD --output-dir ./data/l3
-
-Note: This script needs outbound access to wss://api-pub.bitfinex.com, which
-is not reachable from this sandboxed environment it hasn't been run or
-tested end-to-end here. Run it from a machine with that network access.
+    python bitfinex_l3_listener.py --symbols tBTCUSD,tETHUSD --output-dir ./l3
+    
 """
 
 from __future__ import annotations
@@ -64,9 +61,6 @@ import websockets
 
 WS_URL = "wss://api-pub.bitfinex.com/ws/2"
 
-# conf flags: SEQ_ALL (sequence numbers on every message) + OB_CHECKSUM (CRC32
-# checksum of top 25 levels sent periodically) both purely diagnostic, they
-# don't change the data, just let you detect drops/corruption.
 FLAG_SEQ_ALL = 65536
 FLAG_OB_CHECKSUM = 131072
 CONF_FLAGS = FLAG_SEQ_ALL | FLAG_OB_CHECKSUM
@@ -79,19 +73,19 @@ log = logging.getLogger("bitfinex_l3")
 
 SCHEMA = pa.schema(
     [
-        ("ts_recv", pa.float64()),     # local receive time (unix, seconds)
-        ("symbol", pa.string()),       # e.g. tBTCUSD
-        ("channel", pa.string()),      # "book" | "trades"
+        ("ts_recv", pa.float64()),     
+        ("symbol", pa.string()),     
+        ("channel", pa.string()),     
         ("chan_id", pa.int64()),
-        ("seq", pa.int64()),           # public sequence number, per-channel counter
-        ("msg_type", pa.string()),     # snapshot | update | checksum | heartbeat | trade
-        ("order_id", pa.int64()),      # book: order id. trades: trade id.
+        ("seq", pa.int64()),          
+        ("msg_type", pa.string()),     
+        ("order_id", pa.int64()),      
         ("price", pa.float64()),
         ("amount", pa.float64()),
-        ("side", pa.string()),         # BUY | SELL, derived from sign(amount)
-        ("is_remove", pa.bool_()),     # book only: True when price == 0 (order left book)
-        ("checksum", pa.int64()),      # populated only for msg_type == "checksum"
-        ("exchange_ts", pa.float64()), # trades only: exchange trade time (unix, seconds)
+        ("side", pa.string()),         
+        ("is_remove", pa.bool_()),     
+        ("checksum", pa.int64()),      
+        ("exchange_ts", pa.float64()), 
     ]
 )
 
@@ -150,8 +144,32 @@ class Writer:
     _buffer: list[dict[str, Any]] = field(default_factory=list)
     _last_flush: float = field(default_factory=time.monotonic)
     _file_count: int = 0
+    _buffer_first_ts: float | None = field(default=None, init=False)
+
+    def __post_init__(self):
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._file_count = self._get_next_file_count()
+
+    def _get_next_file_count(self) -> int:
+        existing = list(self.output_dir.glob("bitfinex_l3_*.parquet"))
+        if not existing:
+            return 0
+        
+        max_count = -1
+        for f in existing:
+            try:
+                # name: bitfinex_l3_TIMESTAMP_XXXXX.parquet
+                count_str = f.stem.split("_")[-1]
+                count = int(count_str)
+                if count > max_count:
+                    max_count = count
+            except (IndexError, ValueError):
+                continue
+        return max_count + 1
 
     def add(self, row: dict[str, Any]) -> None:
+        if not self._buffer:
+            self._buffer_first_ts = row.get("ts_recv") or time.time()
         self._buffer.append(row)
         if len(self._buffer) >= self.batch_size or (
             time.monotonic() - self._last_flush >= self.flush_interval_s
@@ -159,26 +177,40 @@ class Writer:
             self.flush()
 
     def add_many(self, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        if not self._buffer:
+            self._buffer_first_ts = rows[0].get("ts_recv") or time.time()
         self._buffer.extend(rows)
         if len(self._buffer) >= self.batch_size or (
             time.monotonic() - self._last_flush >= self.flush_interval_s
         ):
             self.flush()
 
+    def flush_on_reconnect(self) -> None:
+        if self._buffer:
+            log.info(
+                "%d rows"
+               , len(self._buffer)
+            )
+            self.flush()
+
     def flush(self) -> None:
         if not self._buffer:
             self._last_flush = time.monotonic()
             return
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+
         table = pa.Table.from_pylist(self._buffer, schema=SCHEMA)
-        fname = f"bitfinex_l3_{int(time.time())}_{self._file_count:05d}.parquet"
+        name_ts = int(self._buffer_first_ts) if self._buffer_first_ts else int(time.time())
+        fname = f"bitfinex_l3_{name_ts}_{self._file_count:05d}.parquet"
         path = self.output_dir / fname
         pq.write_table(table, path, compression="zstd")
         log.info("flushed %d rows -> %s", len(self._buffer), path)
+        
         self._buffer.clear()
+        self._buffer_first_ts = None
         self._last_flush = time.monotonic()
         self._file_count += 1
-
 
 class BitfinexL3Listener:
     def __init__(
@@ -194,8 +226,8 @@ class BitfinexL3Listener:
             batch_size=batch_size,
             flush_interval_s=flush_interval_s,
         )
-        self._chan_info: dict[int, tuple[str, str]] = {}  # chan_id -> (channel_type, symbol)
-        self._last_seq: int | None = None  # global across the whole connection, not per-channel
+        self._chan_info: dict[int, tuple[str, str]] = {} 
+        self._last_seq: int | None = None 
         self._stop = asyncio.Event()
 
     def request_stop(self) -> None:
@@ -216,10 +248,10 @@ class BitfinexL3Listener:
         self.writer.flush()
 
     async def _run_once(self) -> None:
+        self.writer.flush_on_reconnect()
         self._chan_info.clear()
         self._last_seq = None
         async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as ws:
-            # Enable sequence numbers + checksums before subscribing.
             await ws.send(json.dumps({"event": "conf", "flags": CONF_FLAGS}))
 
             for symbol in self.symbols:
@@ -251,7 +283,6 @@ class BitfinexL3Listener:
                 self._handle(msg, ts_recv)
 
     def _handle(self, msg: Any, ts_recv: float) -> None:
-        # Control-plane messages arrive as JSON objects with an "event" key.
         if isinstance(msg, dict):
             event = msg.get("event")
             if event == "subscribed" and msg.get("channel") in {"book", "trades"}:
@@ -281,10 +312,6 @@ class BitfinexL3Listener:
         elif channel == "trades":
             self._handle_trades(chan_id, symbol, second, msg, ts_recv)
         else:
-            # Rare startup race: data can arrive for a chan_id before we've
-            # processed its "subscribed" ack. Still register its seq (last
-            # element, if int) so the global counter doesn't desync even
-            # though we can't classify/persist the row itself.
             trailing = msg[-1] if len(msg) > 2 and isinstance(msg[-1], int) else None
             self._check_seq(chan_id, symbol, trailing)
             log.warning("message on unmapped channel (chan_id=%s): %s", chan_id, msg)
@@ -306,7 +333,6 @@ class BitfinexL3Listener:
         seq = msg[2] if len(msg) > 2 else None
         self._check_seq(chan_id, symbol, seq)
 
-        # Snapshot: list of [order_id, price, amount] triples.
         if isinstance(payload, list) and payload and isinstance(payload[0], list):
             rows = [normalize_entry(chan_id, symbol, entry, seq, ts_recv) for entry in payload]
             for row in rows:
@@ -314,7 +340,6 @@ class BitfinexL3Listener:
             self.writer.add_many(rows)
             return
 
-        # Single update: [order_id, price, amount]
         if isinstance(payload, list) and len(payload) == 3:
             row = normalize_entry(chan_id, symbol, payload, seq, ts_recv)
             self.writer.add(row)
@@ -323,12 +348,6 @@ class BitfinexL3Listener:
         log.warning("unrecognized book message shape: %s", msg)
 
     def _handle_trades(self, chan_id: int, symbol: str, second: Any, msg: list, ts_recv: float) -> None:
-        # "te" = trade executed (captured). "tu" = trade update/confirmation
-        # a moment later, same trade ID not persisted, to avoid double-
-        # counting the same trade. BUT it still consumes a slot in
-        # Bitfinex's connection-wide seq counter (every packet does), so we
-        # must still register its seq here or the tracker desyncs by one
-        # and reports a phantom gap on the very next message we do persist.
         if second == "tu":
             seq = msg[3] if len(msg) > 3 else None
             self._check_seq(chan_id, symbol, seq)
@@ -342,10 +361,6 @@ class BitfinexL3Listener:
             self.writer.add(row)
             return
 
-        # Trade snapshot (recent history sent once on subscribe): list of
-        # [ID, MTS, AMOUNT, PRICE]. Not persisted it predates our capture
-        # window and duplicating it against live "te" prints isn't worth
-        # the complexity for backtesting purposes.
         if isinstance(second, list) and second and isinstance(second[0], list):
             seq = msg[2] if len(msg) > 2 else None
             self._check_seq(chan_id, symbol, seq)
@@ -354,13 +369,6 @@ class BitfinexL3Listener:
         log.warning("unrecognized trades message shape: %s", msg)
 
     def _check_seq(self, chan_id: int, symbol: str, seq: int | None) -> None:
-        # NOTE: seq is global to the whole connection when SEQ_ALL is
-        # enabled -- Bitfinex interleaves one shared counter across every
-        # subscribed channel, it does NOT reset/count independently per
-        # channel. Tracking this per chan_id (as an earlier version of this
-        # script did) produces false-positive gap warnings, since each
-        # channel's own messages skip over numbers consumed by the other
-        # channel in between.
         if seq is None:
             return
         if self._last_seq is not None and seq != self._last_seq + 1:
@@ -386,7 +394,7 @@ async def main_async(args: argparse.Namespace) -> None:
         try:
             loop.add_signal_handler(sig, listener.request_stop)
         except NotImplementedError:
-            pass  # Windows
+            pass 
 
     if args.duration:
         async def _timed_stop():
