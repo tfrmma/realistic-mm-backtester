@@ -25,14 +25,22 @@ class LatencySimulator:
         self._cfg  = config
         self._rng  = np.random.default_rng(seed)
         self._heap: list[_Event] = []
+        # every sampled delay, kept for reporting.plots.fill_latency_distribution
+        # lets you check the simulator actually drew what LatencyConfig says
+        self._order_latencies: list[float] = []
+        self._cancel_latencies: list[float] = []
 
     def submit_order(self, order: Any, submit_ts: float) -> float:
-        arrive = submit_ts + self._sample(self._cfg.order_us)
+        delay = self._sample(self._cfg.order_us)
+        self._order_latencies.append(delay)
+        arrive = submit_ts + delay
         heapq.heappush(self._heap, _Event(arrive, ("order", order)))
         return arrive
 
     def submit_cancel(self, cancel: Any, submit_ts: float) -> float:
-        arrive = submit_ts + self._sample(self._cfg.cancel_us)
+        delay = self._sample(self._cfg.cancel_us)
+        self._cancel_latencies.append(delay)
+        arrive = submit_ts + delay
         heapq.heappush(self._heap, _Event(arrive, ("cancel", cancel)))
         return arrive
 
@@ -50,6 +58,14 @@ class LatencySimulator:
 
     def clear(self) -> None:
         self._heap.clear()
+
+    @property
+    def order_latencies(self) -> list[float]:
+        return self._order_latencies
+
+    @property
+    def cancel_latencies(self) -> list[float]:
+        return self._cancel_latencies
 
     def _sample(self, median: float) -> float:
         return float(self._rng.lognormal(np.log(median), self._cfg.jitter))
