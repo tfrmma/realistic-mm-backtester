@@ -114,6 +114,56 @@ def fill_analysis(report: BacktestReport, bins: int = 30, ax: plt.Axes | None = 
     return fig
 
 
+def fill_latency_distribution(
+    report: BacktestReport,
+    kind: str = "order",
+    bins: int = 40,
+    ax: plt.Axes | None = None,
+) -> plt.Figure:
+    """
+    Histogram of actually-sampled order/cancel latencies vs the theoretical
+    lognormal PDF implied by the LatencyConfig used for the run. Only
+    ProBacktestEngine populates this data (BacktestEngine/MultiAssetEngine
+    have no latency model) sanity-checks that the simulator drew what you
+    configured, and shows the realized jitter shape instead of just the
+    median/sigma numbers.
+    """
+    if kind not in ("order", "cancel"):
+        raise ValueError(f"kind must be 'order' or 'cancel', got '{kind}'")
+
+    m = report.metrics
+    latencies = m.order_latencies_us if kind == "order" else m.cancel_latencies_us
+    _require(latencies, f"{kind}_latencies_us (only populated by ProBacktestEngine)")
+    if m.latency_config is None:
+        raise ValueError("metrics.latency_config is empty only ProBacktestEngine sets it")
+
+    median = m.latency_config.order_us if kind == "order" else m.latency_config.cancel_us
+    sigma  = m.latency_config.jitter
+    obs_median = float(np.median(latencies))
+
+    with mpl.rc_context(_STYLE):
+        fig, ax_ = _get_ax(ax, figsize=(8, 4))
+        ax_.hist(latencies, bins=bins, density=True, color=_BLUE, alpha=0.65,
+                 edgecolor="none", label="observed")
+        if sigma > 0:
+            xs  = np.linspace(max(1e-6, min(latencies) * 0.5), max(latencies) * 1.2, 400)
+            # lognormal PDF with mu=log(median), sigma=jitter -- matches
+            # LatencySimulator._sample()'s rng.lognormal(log(median), jitter)
+            pdf = (1.0 / (xs * sigma * np.sqrt(2 * np.pi))) * np.exp(
+                -((np.log(xs) - np.log(median)) ** 2) / (2 * sigma ** 2)
+            )
+            ax_.plot(xs, pdf, color=_ORANGE, lw=1.6, label=f"lognormal model (median={median:.0f}us)")
+        else:
+            ax_.axvline(median, color=_ORANGE, lw=1.6, label=f"model (deterministic, ={median:.0f}us)")
+        ax_.axvline(obs_median, color=_RED, lw=1.0, ls="--", label=f"observed median={obs_median:.1f}us")
+        ax_.set_xlabel(f"{kind} latency (us)")
+        ax_.set_ylabel("density")
+        ax_.set_title(f"{kind} latency: observed vs lognormal model")
+        ax_.legend()
+        fig.tight_layout()
+    return fig
+
+
 def summary_dashboard(report: BacktestReport) -> plt.Figure:
     with mpl.rc_context(_STYLE):
         fig = plt.figure(figsize=(14, 8))
