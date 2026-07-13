@@ -351,11 +351,43 @@ plt.show()
 Individual plots are also available standalone:
 
 ```python
-plots.equity_curve(report)        # cumulative PnL, realized vs total
-plots.inventory_over_time(report) # position over time
-plots.adverse_selection(report)   # are we getting picked off?
-plots.fill_analysis(report)       # queue depth at fill (FIFO diagnostic)
+plots.equity_curve(report)               # cumulative PnL, realized vs total
+plots.inventory_over_time(report)        # position over time
+plots.adverse_selection(report)          # are we getting picked off?
+plots.fill_analysis(report)              # queue depth at fill (FIFO diagnostic)
+plots.fill_latency_distribution(report)  # observed order/cancel latency vs the lognormal model
+                                          # (ProBacktestEngine only -- BacktestEngine/MultiAssetEngine
+                                          # have no latency simulation to plot)
 ```
+
+### Comparing multiple runs (S6)
+
+`param_heatmap`/`ranking_table` (see Parameter sweeps below) tell you which
+config won; `equity_curves_overlay` shows *how* -- overlay several sweep
+runs' equity curves to see drawdown timing or edge decay that a single
+net_pnl number hides:
+
+```python
+from mmbt.reporting.sweep_plots import equity_curves_overlay
+
+equity_curves_overlay(results, top_n=5, by="net_pnl")  # best 5 configs, superimposed
+```
+
+### Interactive HTML export (S6)
+
+The plots above are static matplotlib. For a zoomable/pannable dashboard you
+can share as a single file:
+
+```python
+from mmbt.reporting.html_export import export_html_dashboard
+
+export_html_dashboard(report, "dashboard.html", title="BTC-USD symmetric MM")
+```
+
+Self-contained by default (`include_plotlyjs=True` embeds plotly.js, ~3-4MB,
+works fully offline). Pass `include_plotlyjs="cdn"` for a much smaller file
+that needs internet to view. Panels with no data (e.g. latency on a
+`BacktestEngine` run) render as a labeled blank instead of erroring.
 
 Load real data from CSV or Parquet:
 
@@ -423,8 +455,9 @@ mmbt/
 ├── reporting/
 │   ├── metrics.py: StrategyMetrics, BacktestReport, EquitySnapshot, FillRecord
 │   ├── mid_history.py: MidHistoryBuffer (fixed-capacity numpy circular buffer)
-│   ├── plots.py: matplotlib, equity curve, inventory, adverse selection, fill analysis
-│   └── sweep_plots.py: matplotlib, param heatmap, PnL vs adverse selection, ranking table
+│   ├── plots.py: matplotlib, equity curve, inventory, adverse selection, fill analysis, fill latency
+│   ├── sweep_plots.py: matplotlib, param heatmap, PnL vs adverse selection, ranking table, equity overlay
+│   └── html_export.py: Plotly interactive HTML dashboard (single portable file)
 │
 └── engine/
     ├── simple.py: BacktestEngine (fast, heuristic fills, no latency)
@@ -473,6 +506,7 @@ Latencies are sampled from a lognormal distribution per-event. Increase `jitter`
 | S4: Launch | done | Exchange Protocol, Portfolio, InventorySkewMM, 80 tests |
 | S5: Rust hot path | done | PyO3 port of FIFOQueueSimulator for multi-month datasets |
 | S6: Engine realism | done | Taker orders (fill or reject on crossing), real `queue_displacement_us`, `MultiAssetEngine`, maker/taker fee split |
+| S7: Reporting depth | done | `fill_latency_distribution`, `equity_curves_overlay`, interactive Plotly HTML export, `OpenInterestSchedule` |
 
 No CI pipeline is wired up yet (`pytest tests/` locally is the only gate right now) - on the roadmap, see Known limitations.
 
@@ -483,3 +517,11 @@ No CI pipeline is wired up yet (`pytest tests/` locally is the only gate right n
 - **`MultiAssetEngine` has no FIFO/latency-aware counterpart yet** - it matches `BacktestEngine`'s fill model (passive heuristic + taker/reject), not `ProBacktestEngine`'s. Use `Portfolio` + N `ProBacktestEngine`s if you need FIFO realism across multiple symbols and don't need them to react to each other within a tick.
 - **CSV/Parquet book depth** is capped by whatever your data provides - the loader reads as many levels as you give it, but doesn't synthesize missing ones.
 - **No CI** - tests only run when someone runs them locally.
+
+---
+
+## Contact
+
+Built by **Taha** - algorithmic trader focused on execution and microstructure.
+
+- Email: fadilrezokt@gmail.com
