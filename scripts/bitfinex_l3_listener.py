@@ -1,46 +1,10 @@
 """
-Captures Bitfinex's "Raw Book" (prec="R0") channel true L3, order-by-order
-AND the "trades" channel, on the same public connection, no auth required.
-Persists normalized events to Parquet, batched by time/size.
+Captures Bitfinex Raw Book (R0, per-order) + trades over one public WS
+connection. Writes normalized Parquet, batched by time/size, gap-safe
+across reconnects. seq is connection-wide (SEQ_ALL), not per-channel.
 
-Both channels are needed for a usable backtest: the book alone tells you
-depth, but a FIFO queue simulator needs trade prints to know when the queue
-in front of your order actually got eaten.
-
-Endpoint: wss://api-pub.bitfinex.com/ws/2  (public market data node).
-
-Book (R0) message shapes, per symbol subscription:
-  snapshot: [chanId, [[order_id, price, amount], ...], seq?]
-  update:   [chanId, [order_id, price, amount], seq?]
-  heartbeat:[chanId, "hb", seq?]
-  checksum: [chanId, "cs", value, seq?]   (only if checksum flag enabled)
-
-Book rules (from Bitfinex docs):
-  - price == 0  -> remove that order_id from the book
-  - amount > 0  -> bid (buy order); amount < 0 -> ask, abs(amount) is the size
-  - R0 books key by order_id, not by price level, unlike P0-P3 aggregated books
-
-Trades message shapes, per symbol subscription:
-  snapshot: [chanId, [[ID, MTS, AMOUNT, PRICE], ...]]   (recent history, not captured see below)
-  executed: [chanId, "te", [ID, MTS, AMOUNT, PRICE]]     (captured, this is the trade print)
-  update:   [chanId, "tu", [ID, MTS, AMOUNT, PRICE]]     (confirms "te" a moment later, not captured avoids duplicates)
-
-Trade rules:
-  - amount > 0 -> buyer was taker; amount < 0 -> seller was taker
-  - MTS is the exchange trade timestamp in epoch milliseconds
-
-Sequence numbers (flag SEQ_ALL=65536) and checksums (flag OB_CHECKSUM=131072)
-are enabled on connect so gaps/corruption are detectable on the book channel.
-Note sequence numbers are per-channel: book and trades count independently,
-so don't compare seq across the two the 'channel' column in the output
-tells you which counter a given row's seq belongs to.
-
-Requires:
-    pip install websockets pyarrow
-
-Usage:
-    python bitfinex_l3_listener.py --symbols tBTCUSD,tETHUSD --output-dir ./l3
-    
+pip install websockets pyarrow
+python bitfinex_l3_listener.py --symbols tBTCUSD,tETHUSD --output-dir ./l3
 """
 
 from __future__ import annotations
@@ -73,19 +37,19 @@ log = logging.getLogger("bitfinex_l3")
 
 SCHEMA = pa.schema(
     [
-        ("ts_recv", pa.float64()),     
-        ("symbol", pa.string()),     
-        ("channel", pa.string()),     
+        ("ts_recv", pa.float64()),     # local receive time (unix, seconds)
+        ("symbol", pa.string()),       # e.g. tBTCUSD
+        ("channel", pa.string()),      # "book" | "trades"
         ("chan_id", pa.int64()),
-        ("seq", pa.int64()),          
-        ("msg_type", pa.string()),     
-        ("order_id", pa.int64()),      
+        ("seq", pa.int64()),           # public sequence number, per-channel counter
+        ("msg_type", pa.string()),     # snapshot | update | checksum | heartbeat | trade
+        ("order_id", pa.int64()),      # book: order id. trades: trade id.
         ("price", pa.float64()),
         ("amount", pa.float64()),
-        ("side", pa.string()),         
-        ("is_remove", pa.bool_()),     
-        ("checksum", pa.int64()),      
-        ("exchange_ts", pa.float64()), 
+        ("side", pa.string()),         # BUY | SELL, derived from sign(amount)
+        ("is_remove", pa.bool_()),     # book only: True when price == 0 (order left book)
+        ("checksum", pa.int64()),      # populated only for msg_type == "checksum"
+        ("exchange_ts", pa.float64()), # trades only: exchange trade time (unix, seconds)
     ]
 )
 
@@ -136,6 +100,13 @@ def normalize_trade_entry(chan_id: int, symbol: str, entry: list, seq: int | Non
     )
 
 
+def _subscribe_msgs(symbol: str) -> list[dict]:
+    return [
+        {"event": "subscribe", "channel": "book", "prec": "R0", "symbol": symbol},
+        {"event": "subscribe", "channel": "trades", "symbol": symbol},
+    ]
+
+
 @dataclass
 class Writer:
     output_dir: Path
@@ -158,7 +129,6 @@ class Writer:
         max_count = -1
         for f in existing:
             try:
-                # name: bitfinex_l3_TIMESTAMP_XXXXX.parquet
                 count_str = f.stem.split("_")[-1]
                 count = int(count_str)
                 if count > max_count:
@@ -188,11 +158,9 @@ class Writer:
             self.flush()
 
     def flush_on_reconnect(self) -> None:
+        """Call before processing a new WS session, prevents mixing epochs in one file."""
         if self._buffer:
-            log.info(
-                "%d rows"
-               , len(self._buffer)
-            )
+            log.info("flushing pending buffer on reconnect (%d rows)", len(self._buffer))
             self.flush()
 
     def flush(self) -> None:
@@ -201,6 +169,7 @@ class Writer:
             return
 
         table = pa.Table.from_pylist(self._buffer, schema=SCHEMA)
+        # filename uses first buffered msg's timestamp, not flush time
         name_ts = int(self._buffer_first_ts) if self._buffer_first_ts else int(time.time())
         fname = f"bitfinex_l3_{name_ts}_{self._file_count:05d}.parquet"
         path = self.output_dir / fname
@@ -226,8 +195,8 @@ class BitfinexL3Listener:
             batch_size=batch_size,
             flush_interval_s=flush_interval_s,
         )
-        self._chan_info: dict[int, tuple[str, str]] = {} 
-        self._last_seq: int | None = None 
+        self._chan_info: dict[int, tuple[str, str]] = {}  # chan_id -> (channel_type, symbol)
+        self._last_seq: int | None = None  # global across the whole connection, not per-channel
         self._stop = asyncio.Event()
 
     def request_stop(self) -> None:
@@ -255,25 +224,8 @@ class BitfinexL3Listener:
             await ws.send(json.dumps({"event": "conf", "flags": CONF_FLAGS}))
 
             for symbol in self.symbols:
-                await ws.send(
-                    json.dumps(
-                        {
-                            "event": "subscribe",
-                            "channel": "book",
-                            "prec": "R0",
-                            "symbol": symbol,
-                        }
-                    )
-                )
-                await ws.send(
-                    json.dumps(
-                        {
-                            "event": "subscribe",
-                            "channel": "trades",
-                            "symbol": symbol,
-                        }
-                    )
-                )
+                for sub_msg in _subscribe_msgs(symbol):
+                    await ws.send(json.dumps(sub_msg))
             log.info("subscribed to raw book (R0) + trades for %s", self.symbols)
 
             while not self._stop.is_set():
@@ -312,6 +264,7 @@ class BitfinexL3Listener:
         elif channel == "trades":
             self._handle_trades(chan_id, symbol, second, msg, ts_recv)
         else:
+            # startup race: data before "subscribed" ack, still track seq
             trailing = msg[-1] if len(msg) > 2 and isinstance(msg[-1], int) else None
             self._check_seq(chan_id, symbol, trailing)
             log.warning("message on unmapped channel (chan_id=%s): %s", chan_id, msg)
@@ -333,6 +286,7 @@ class BitfinexL3Listener:
         seq = msg[2] if len(msg) > 2 else None
         self._check_seq(chan_id, symbol, seq)
 
+        # snapshot: list of triples
         if isinstance(payload, list) and payload and isinstance(payload[0], list):
             rows = [normalize_entry(chan_id, symbol, entry, seq, ts_recv) for entry in payload]
             for row in rows:
@@ -340,6 +294,7 @@ class BitfinexL3Listener:
             self.writer.add_many(rows)
             return
 
+        # single update
         if isinstance(payload, list) and len(payload) == 3:
             row = normalize_entry(chan_id, symbol, payload, seq, ts_recv)
             self.writer.add(row)
@@ -348,6 +303,7 @@ class BitfinexL3Listener:
         log.warning("unrecognized book message shape: %s", msg)
 
     def _handle_trades(self, chan_id: int, symbol: str, second: Any, msg: list, ts_recv: float) -> None:
+        # "tu" dup-confirms "te", not persisted but still consumes a seq slot
         if second == "tu":
             seq = msg[3] if len(msg) > 3 else None
             self._check_seq(chan_id, symbol, seq)
@@ -361,6 +317,7 @@ class BitfinexL3Listener:
             self.writer.add(row)
             return
 
+        # trade snapshot (history on subscribe), not persisted
         if isinstance(second, list) and second and isinstance(second[0], list):
             seq = msg[2] if len(msg) > 2 else None
             self._check_seq(chan_id, symbol, seq)
@@ -369,12 +326,12 @@ class BitfinexL3Listener:
         log.warning("unrecognized trades message shape: %s", msg)
 
     def _check_seq(self, chan_id: int, symbol: str, seq: int | None) -> None:
+        # seq is connection-wide, not per-channel
         if seq is None:
             return
         if self._last_seq is not None and seq != self._last_seq + 1:
             log.warning(
-                "seq gap (connection-wide): expected %d, got %d on chan %s (%s) "
-                "resubscribe to force a fresh snapshot",
+                "seq gap: expected %d, got %d on chan %s (%s), resubscribe for fresh snapshot",
                 self._last_seq + 1, seq, chan_id, symbol,
             )
         self._last_seq = seq
@@ -394,7 +351,7 @@ async def main_async(args: argparse.Namespace) -> None:
         try:
             loop.add_signal_handler(sig, listener.request_stop)
         except NotImplementedError:
-            pass 
+            pass  # Windows
 
     if args.duration:
         async def _timed_stop():
