@@ -9,7 +9,7 @@ try:
 except ImportError as exc:
     raise ImportError("sweep_plots needs matplotlib: pip install realistic-mm-backtester[dev]") from exc
 
-from mmbt.engine.sweep import SweepResult
+from mmbt.engine.sweep import ParameterSweep, SweepResult
 
 _STYLE: dict = {
     "axes.spines.top":   False,
@@ -158,6 +158,58 @@ def ranking_table(
         ax.set_title(f"top {n_rows} results  (by {by})", pad=14, fontsize=10)
         fig.tight_layout()
     return fig
+
+
+def equity_curves_overlay(
+    results: list[SweepResult],
+    top_n: int | None = 10,
+    by: str = "net_pnl",
+    labels: list[str] | None = None,
+) -> plt.Figure:
+    """
+    Overlay several sweep runs' equity curves on one plot. A ranking table
+    tells you which config won on net_pnl; this shows *how* whether one
+    run's edge decayed over the session, whether the best net_pnl came with
+    a much rougher ride, drawdown timing that a single number can't convey.
+
+    top_n picks the best N by `by` (same metric names as ParameterSweep.best);
+    pass top_n=None to plot every valid result (only sensible for small sweeps).
+    """
+    valid = [r for r in results if r.is_valid and r.report is not None]
+    if not valid:
+        raise ValueError("no valid results with a BacktestReport")
+    if top_n is not None:
+        valid = ParameterSweep.best(valid, by=by, top_n=top_n)
+    if labels is not None and len(labels) != len(valid):
+        raise ValueError(f"labels has {len(labels)} entries but {len(valid)} results are being plotted")
+
+    with mpl.rc_context(_STYLE):
+        fig, ax = plt.subplots(figsize=(11, 5))
+        cmap = plt.get_cmap("tab10")
+        plotted = 0
+        for i, r in enumerate(valid):
+            snaps = r.report.metrics.equity_snapshots  # type: ignore[union-attr]
+            if not snaps:
+                continue
+            ts     = [s.ts for s in snaps]
+            equity = [s.equity for s in snaps]
+            label  = labels[i] if labels else _short_label(r.params)
+            ax.plot(ts, equity, lw=1.1, alpha=0.85, color=cmap(i % 10), label=label)
+            plotted += 1
+        if plotted == 0:
+            raise ValueError("none of the selected results have equity_snapshots to plot")
+        ax.axhline(0, color=_GRAY, lw=0.6, ls="--", alpha=0.6)
+        ax.set_xlabel("time (us)")
+        ax.set_ylabel("equity")
+        ax.set_title(f"equity curves overlay ({plotted} runs, top by {by})" if top_n else
+                     f"equity curves overlay ({plotted} runs)")
+        ax.legend(loc="upper left", fontsize=7, ncol=2)
+        fig.tight_layout()
+    return fig
+
+
+def _short_label(params: dict) -> str:
+    return ", ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in params.items())
 
 
 def _check_metric(metric: str) -> None:
