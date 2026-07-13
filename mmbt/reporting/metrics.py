@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from mmbt.core.types import Fill, Side
+from mmbt.latency.config import LatencyConfig
 from mmbt.reporting.mid_history import MidHistoryBuffer
 
 
@@ -39,6 +40,12 @@ class StrategyMetrics:
     realized_pnl: float = 0.0
     fees_paid: float = 0.0
     rejected_orders: int = 0  # post-only orders that would have crossed the book
+    # sampled order/cancel arrival delays and the config that produced them
+    # only ProBacktestEngine populates these (BacktestEngine/MultiAssetEngine
+    # have no latency model at all). See reporting.plots.fill_latency_distribution.
+    order_latencies_us: list[float] = field(default_factory=list)
+    cancel_latencies_us: list[float] = field(default_factory=list)
+    latency_config: LatencyConfig | None = None
 
     def __post_init__(self) -> None:
         self.mid_history = MidHistoryBuffer(self.mid_history_capacity)
@@ -163,7 +170,7 @@ def _adverse_scores(
     earliest = ts_list[0]
     for fr in fill_records:
         if fr.fill.ts < earliest:
-            # fill predates the retained mid_history window, with a bounded
+            # fill predates the retained mid_history window with a bounded
             # MidHistoryBuffer this happens once the buffer has wrapped past
             # it. bisect would otherwise silently return index 0 here (not
             # "not found"), scoring the fill against the wrong mid entirely.
