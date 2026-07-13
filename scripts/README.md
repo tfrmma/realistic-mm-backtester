@@ -19,7 +19,7 @@ pip install -e ".[capture]"
 
 ## Workflow
 
-**1. Capture** — leave this running (background / VPS) to accumulate history:
+**1. Capture** leave this running (background / VPS) to accumulate history:
 
 ```bash
 python scripts/bitfinex_l3_listener.py --symbols tBTCUSD --output-dir ./l3
@@ -31,17 +31,17 @@ see the file's own docstring for the full message-format notes and known
 limitations (only Bitfinex and Coinbase expose L3 publicly; other exchanges
 don't offer it at any price for retail).
 
-**2. Merge** — once you've got a batch of files, consolidate them:
+**2. Merge** once you've got a batch of files, consolidate them:
 
 ```bash
 python scripts/merge_l3_parquets.py ./l3 --output ./l3_merged/tBTCUSD.parquet --symbol tBTCUSD
 ```
 
-Optional — `mmbt.data.l3_bitfinex.BitfinexL3Exchange` reads a directory of
+Optional `mmbt.data.l3_bitfinex.BitfinexL3Exchange` reads a directory of
 many small files just fine. Merging is for convenience (one file to move
 around) and to drop exact-duplicate rows if a capture session overlapped.
 
-**3. Backtest** — feed it into the engine like any other Exchange:
+**3. Backtest** feed it into the engine like any other Exchange:
 
 ```python
 from mmbt.data.l3_bitfinex import BitfinexL3Exchange
