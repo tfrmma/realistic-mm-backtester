@@ -1,5 +1,7 @@
 # realistic-mm-backtester - market making backtester
 
+[![CI](https://github.com/tfrmma/realistic-mm-backtester/actions/workflows/ci.yml/badge.svg)](https://github.com/tfrmma/realistic-mm-backtester/actions/workflows/ci.yml)
+
 **FIFO queue simulation for market making strategies.**
 
 Most open-source backtesters fill your passive orders the moment a trade crosses your price. That's not how exchanges work. This one actually models the queue.
@@ -23,7 +25,7 @@ Most open-source backtesters fill your passive orders the moment a trade crosses
 ## Install
 
 ```bash
-git clone https://github.com/tfrmma/realistic-mm-backtester
+git clone https://github.com/tfrmma/realistic-mm-backtester.git
 cd realistic-mm-backtester
 pip install -e ".[dev]"
 ```
@@ -102,19 +104,19 @@ class MyStrategy(BaseStrategy):
 ## Taker orders
 
 An `Order` whose price already crosses the book (a BUY at or above the best
-ask, a SELL at or below the best bid) doesn't join the passive queue - it's
+ask, a SELL at or below the best bid) doesn't join the passive queue it's
 handled as a taker order instead:
 
 - `is_post_only=False` (default): fills immediately against visible depth,
   walking multiple book levels if needed for a size-weighted average price
-  (see `queue/taker.py`). Any unfilled remainder does **not** rest - same IOC
+  (see `queue/taker.py`). Any unfilled remainder does **not** rest same IOC
   semantics as a real market/marketable-limit order.
 - `is_post_only=True`: rejected outright, same as a real exchange would
   reject a post-only order that would take liquidity. Check
   `StrategyMetrics.rejected_orders` to see how often this happened.
 
 In `ProBacktestEngine` this is evaluated against the **true** book at the
-moment the order actually lands (after `order_us` latency) - not the stale
+moment the order actually lands (after `order_us` latency) not the stale
 view the strategy saw when it decided to submit. A resting-looking order can
 still get taker-filled or rejected if the market moved during the trip.
 
@@ -246,12 +248,12 @@ for tick in ex.load_ticks("BTC-USD", start_ts=0, end_ts=1e13):
 
 Implement the `Exchange` protocol to add live feed or other venue adapters.
 `fee_rate_maker`/`fee_rate_taker` here map straight through to
-`ProBacktestEngine`/`BacktestEngine`'s constructor args of the same name -
+`ProBacktestEngine`/`BacktestEngine`'s constructor args of the same name
 pass a negative `fee_rate_maker` yourself if your venue pays rebates.
 
 ## Open interest (S6)
 
-`OpenInterestSchedule` is a standalone, engine-agnostic lookup - not part of
+`OpenInterestSchedule` is a standalone, engine-agnostic lookup not part of
 the tick stream or any engine. OI typically updates far less often than the
 book (seconds to minutes, not ticks), so it isn't baked into
 `MarketTick`/`OrderBook`; build one yourself and query it from inside your
@@ -280,7 +282,7 @@ and the synthetic `generate_oi_schedule(...)` (random walk, same spirit as
 
 ## Inventory skew strategy (S4)
 
-`InventorySkewMM` is the second reference implementation - shifts quotes based on position:
+`InventorySkewMM` is the second reference implementation shifts quotes based on position:
 
 ```python
 from examples.strategies.inventory_skew_mm import InventorySkewMM
@@ -334,7 +336,7 @@ Use `n_jobs=1` during development to avoid subprocess overhead.
 
 ### Out-of-sample validation (S7)
 
-A grid search finds whatever config performed best on the data you gave it —
+A grid search finds whatever config performed best on the data you gave it
 that's not the same as finding a real edge. `out_of_sample_validate` splits
 `ticks` chronologically (no shuffling, this is time-series data), sweeps the
 grid on the training slice, then re-runs only the top candidates on the
@@ -350,14 +352,14 @@ for r in results:
 ```
 
 `overfit_flag` is a cheap heuristic (profitable in-sample, unprofitable
-out-of-sample) — not a rigorous test. Use `degradation` and your own judgement
+out-of-sample) not a rigorous test. Use `degradation` and your own judgement
 too.
 
 ### Walk-forward testing (S7)
 
 A single train/test split can land in one lucky (or unlucky) regime.
 `walk_forward_validate` rolls the split forward through the data in several
-folds, re-optimizing and re-validating each time — more relevant for
+folds, re-optimizing and re-validating each time more relevant for
 microstructure than a static split, since vol/spread/flow regimes shift
 within a single day:
 
@@ -372,7 +374,7 @@ print(summary)  # oos_profitable_frac, avg/std OOS net_pnl, winning-config consi
 
 `expanding=False` (default) uses a fixed-size rolling training window (recent
 history only); `expanding=True` grows the window from the start each fold
-(all history seen so far). Low `param_consistency` in the summary — a
+(all history seen so far). Low `param_consistency` in the summary a
 different config wins every fold — is itself a signal: that's a coin flip,
 not a strategy with a stable edge.
 
@@ -400,14 +402,14 @@ plots.inventory_over_time(report)        # position over time
 plots.adverse_selection(report)          # are we getting picked off?
 plots.fill_analysis(report)              # queue depth at fill (FIFO diagnostic)
 plots.fill_latency_distribution(report)  # observed order/cancel latency vs the lognormal model
-                                          # (ProBacktestEngine only -- BacktestEngine/MultiAssetEngine
+                                          # (ProBacktestEngine only BacktestEngine/MultiAssetEngine
                                           # have no latency simulation to plot)
 ```
 
 ### Comparing multiple runs (S6)
 
 `param_heatmap`/`ranking_table` (see Parameter sweeps below) tell you which
-config won; `equity_curves_overlay` shows *how* -- overlay several sweep
+config won; `equity_curves_overlay` shows *how* overlay several sweep
 runs' equity curves to see drawdown timing or edge decay that a single
 net_pnl number hides:
 
@@ -521,7 +523,7 @@ The cancel model controls how much of the queue ahead of you evaporates on each 
 | `ReduceRatioCancelModel(0.20)` | Fixed 20% of in-front queue cancels per trade | Fast, interpretable default |
 | `ProbQueueCancelModel(min=0.05, max=0.70)` | Cancel rate scales with `trade_size / qty_in_front` | More realistic on deep books |
 
-Implement `CancelModel` protocol to plug in your own calibration - a custom model falls back to the pure-Python queue path automatically (Rust can't call back into arbitrary Python cancellation logic).
+Implement `CancelModel` protocol to plug in your own calibration a custom model falls back to the pure-Python queue path automatically (Rust can't call back into arbitrary Python cancellation logic).
 
 
 ---
@@ -551,21 +553,19 @@ Latencies are sampled from a lognormal distribution per-event. Increase `jitter`
 | S5: Rust hot path | done | PyO3 port of FIFOQueueSimulator for multi-month datasets |
 | S6: Engine realism | done | Taker orders (fill or reject on crossing), real `queue_displacement_us`, `MultiAssetEngine`, maker/taker fee split |
 | S7: Reporting + sweep validation | done | `fill_latency_distribution`, `equity_curves_overlay`, interactive Plotly HTML export, `OpenInterestSchedule`, `out_of_sample_validate`, `walk_forward_validate` |
-
-No CI pipeline is wired up yet (`pytest tests/` locally is the only gate right now) - on the roadmap, see Known limitations.
+| S8: CI | done | GitHub Actions: lint, Python-only tests (3.11/3.12), Rust-accelerated tests + Python<->Rust parity checks |
 
 ---
 
 ## Known limitations
 
-- **`MultiAssetEngine` has no FIFO/latency-aware counterpart yet** - it matches `BacktestEngine`'s fill model (passive heuristic + taker/reject), not `ProBacktestEngine`'s. Use `Portfolio` + N `ProBacktestEngine`s if you need FIFO realism across multiple symbols and don't need them to react to each other within a tick.
+- **`MultiAssetEngine` has no FIFO/latency-aware counterpart yet** it matches `BacktestEngine`'s fill model (passive heuristic + taker/reject), not `ProBacktestEngine`'s. Use `Portfolio` + N `ProBacktestEngine`s if you need FIFO realism across multiple symbols and don't need them to react to each other within a tick.
 - **CSV/Parquet book depth** is capped by whatever your data provides the loader reads as many levels as you give it, but doesn't synthesize missing ones.
-- **No CI** - tests only run when someone runs them locally.
 
 ---
 
 ## Contact
 
-Built by **Taha** - algorithmic trader focused on execution and microstructure.
+Built by **Taha** algorithmic trader focused on execution and microstructure.
 
 - Email: fadilrezokt@gmail.com
