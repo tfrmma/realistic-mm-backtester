@@ -23,7 +23,7 @@ Most open-source backtesters fill your passive orders the moment a trade crosses
 ## Install
 
 ```bash
-git clone https://github.com/tfrmma/realistic-mm-backtester.git
+git clone https://github.com/tfrmma/realistic-mm-backtester
 cd realistic-mm-backtester
 pip install -e ".[dev]"
 ```
@@ -332,6 +332,50 @@ ranking_table(results, by="sharpe", top_n=10)
 
 Use `n_jobs=1` during development to avoid subprocess overhead.
 
+### Out-of-sample validation (S7)
+
+A grid search finds whatever config performed best on the data you gave it —
+that's not the same as finding a real edge. `out_of_sample_validate` splits
+`ticks` chronologically (no shuffling, this is time-series data), sweeps the
+grid on the training slice, then re-runs only the top candidates on the
+held-out slice so you can see whether the in-sample winner actually holds up:
+
+```python
+from mmbt.engine.sweep import out_of_sample_validate
+
+results = out_of_sample_validate(grid, run_fn=run_symmetric_mm, ticks=ticks,
+                                  train_frac=0.8, top_n=5)
+for r in results:
+    print(r.params, r.in_sample_pnl, r.out_of_sample_pnl, r.degradation, r.overfit_flag)
+```
+
+`overfit_flag` is a cheap heuristic (profitable in-sample, unprofitable
+out-of-sample) — not a rigorous test. Use `degradation` and your own judgement
+too.
+
+### Walk-forward testing (S7)
+
+A single train/test split can land in one lucky (or unlucky) regime.
+`walk_forward_validate` rolls the split forward through the data in several
+folds, re-optimizing and re-validating each time — more relevant for
+microstructure than a static split, since vol/spread/flow regimes shift
+within a single day:
+
+```python
+from mmbt.engine.sweep import walk_forward_validate, walk_forward_summary
+
+folds   = walk_forward_validate(grid, run_fn=run_symmetric_mm, ticks=ticks,
+                                 n_folds=5, expanding=False)
+summary = walk_forward_summary(folds)
+print(summary)  # oos_profitable_frac, avg/std OOS net_pnl, winning-config consistency
+```
+
+`expanding=False` (default) uses a fixed-size rolling training window (recent
+history only); `expanding=True` grows the window from the start each fold
+(all history seen so far). Low `param_consistency` in the summary — a
+different config wins every fold — is itself a signal: that's a coin flip,
+not a strategy with a stable edge.
+
 ## Reporting (S2)
 
 After a run, build a `BacktestReport` for full analysis:
@@ -506,7 +550,7 @@ Latencies are sampled from a lognormal distribution per-event. Increase `jitter`
 | S4: Launch | done | Exchange Protocol, Portfolio, InventorySkewMM, 80 tests |
 | S5: Rust hot path | done | PyO3 port of FIFOQueueSimulator for multi-month datasets |
 | S6: Engine realism | done | Taker orders (fill or reject on crossing), real `queue_displacement_us`, `MultiAssetEngine`, maker/taker fee split |
-| S7: Reporting depth | done | `fill_latency_distribution`, `equity_curves_overlay`, interactive Plotly HTML export, `OpenInterestSchedule` |
+| S7: Reporting + sweep validation | done | `fill_latency_distribution`, `equity_curves_overlay`, interactive Plotly HTML export, `OpenInterestSchedule`, `out_of_sample_validate`, `walk_forward_validate` |
 
 No CI pipeline is wired up yet (`pytest tests/` locally is the only gate right now) - on the roadmap, see Known limitations.
 
@@ -515,7 +559,7 @@ No CI pipeline is wired up yet (`pytest tests/` locally is the only gate right n
 ## Known limitations
 
 - **`MultiAssetEngine` has no FIFO/latency-aware counterpart yet** - it matches `BacktestEngine`'s fill model (passive heuristic + taker/reject), not `ProBacktestEngine`'s. Use `Portfolio` + N `ProBacktestEngine`s if you need FIFO realism across multiple symbols and don't need them to react to each other within a tick.
-- **CSV/Parquet book depth** is capped by whatever your data provides - the loader reads as many levels as you give it, but doesn't synthesize missing ones.
+- **CSV/Parquet book depth** is capped by whatever your data provides the loader reads as many levels as you give it, but doesn't synthesize missing ones.
 - **No CI** - tests only run when someone runs them locally.
 
 ---
