@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import product
 from typing import Any, Callable
 
