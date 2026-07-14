@@ -13,7 +13,7 @@ _TRADE    = {"trade_px", "trade_sz", "trade_side"}
 def _level_columns(columns: set[str], prefix: str) -> list[tuple[str, str]]:
     """
     Ordered (price_col, size_col) pairs for one side of the book, best level
-    first. `{prefix}_px`/`{prefix}_sz` (no suffix) is level 1 -- kept bare for
+    first. `{prefix}_px`/`{prefix}_sz` (no suffix) is level 1 kept bare for
     backward compatibility with single-level CSVs. Deeper levels are
     `{prefix}_px_2`/`{prefix}_sz_2`, `{prefix}_px_3`/`{prefix}_sz_3`, etc.,
     picked up in order until a number is missing. Provide as many as your
@@ -92,10 +92,6 @@ def _parquet_iter(path: Path, symbol: str, batch_size: int) -> Iterator[MarketTi
         import pyarrow.parquet as pq
     except ImportError:
         raise ImportError("pyarrow required for Parquet reads: pip install mmbt[dev]")
-    try:
-        import pandas as pd
-    except ImportError:
-        raise ImportError("pandas required: pip install mmbt[dev]")
 
     pf      = pq.ParquetFile(path)
     columns = set(pf.schema_arrow.names)
