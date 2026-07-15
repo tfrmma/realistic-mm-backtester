@@ -1,0 +1,101 @@
+name: CI
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install ruff
+      - run: ruff check mmbt/
+
+  test-python-only:
+    # the plain `pip install -e .` path no Rust toolchain involved at all.
+    # This is what most contributors actually run day to day, and it's the
+    # pure-Python FIFOQueueSimulator fallback (using_rust == False) that
+    # every non-Rust dev relies on. Matrixed across both supported versions;
+    # the Rust job below stays single-version to keep total CI time down.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install (Python-only, no Rust)
+        run: pip install -e ".[dev]"
+      - name: Confirm the Rust extension is NOT active here
+        run: |
+          python -c "
+          from mmbt.queue.fifo import RUST_AVAILABLE
+          assert not RUST_AVAILABLE, 'unexpected: rust extension present in the python-only job'
+          "
+      - name: Run test suite
+        run: pytest tests/ -v
+
+  test-with-rust:
+    # builds the PyO3 extension and re-runs the full suite against the
+    # Rust-accelerated FIFOQueueSimulator path, then explicitly runs the
+    # Python<->Rust fill-parity checks (test_fifo_rust_parity.py) and the
+    # existing bench_fifo.py cross-check these are skipped entirely
+    # whenever the extension isn't compiled, so they need this job to ever
+    # actually run at all.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Create venv
+        # maturin develop requires an active virtualenv (VIRTUAL_ENV set)
+        # actions/setup-python alone doesn't provide one. GITHUB_PATH/GITHUB_ENV
+        # persist across the rest of this job's steps.
+        run: |
+          python -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+
+      - name: Install Python deps + maturin
+        run: |
+          pip install -e ".[dev]"
+          pip install maturin
+
+      - name: Build and install the Rust extension in place
+        run: maturin develop --release
+
+      - name: Confirm the Rust extension IS active here
+        run: |
+          python -c "
+          from mmbt.queue.fifo import RUST_AVAILABLE
+          assert RUST_AVAILABLE, 'rust extension failed to build or load'
+          "
+
+      - name: Run full test suite (Rust-accelerated path)
+        run: pytest tests/ -v
+
+      - name: Run Python<->Rust fill-parity checks explicitly
+        run: pytest tests/test_fifo_rust_parity.py -v
+
+      - name: bench_fifo.py correctness cross-check
+        run: python benchmarks/bench_fifo.py
