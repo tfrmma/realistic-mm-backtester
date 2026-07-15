@@ -27,8 +27,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev  = ["pytest>=7.4", "matplotlib>=3.8", "plotly>=5.18", "pandas>=2.0", "pyarrow>=14.0"]
-rust = ["maturin>=1.4"]   # needed to compile mmbt._core
+dev     = ["pytest>=7.4", "matplotlib>=3.8", "plotly>=5.18", "pandas>=2.0", "pyarrow>=14.0"]
+rust    = ["maturin>=1.4"]   # needed to compile mmbt._core
+capture = ["websockets>=12.0", "pyarrow>=14.0"]   # needed for scripts/bitfinex_l3_listener.py
 
 [tool.setuptools.packages.find]
 where   = ["."]
