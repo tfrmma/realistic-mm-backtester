@@ -34,7 +34,7 @@ don't offer it at any price for retail).
 **2. Merge** once you've got a batch of files, consolidate them:
 
 ```bash
-python scripts/merge_l3_parquets.py ./l3 --output ./l3_merged/tBTCUSD.parquet --symbol tBTCUSD
+python scripts/merge_l3.py ./l3 --output ./l3_merged/tBTCUSD.parquet --symbol tBTCUSD
 ```
 
 Optional `mmbt.data.l3_bitfinex.BitfinexL3Exchange` reads a directory of
@@ -52,7 +52,7 @@ from examples.strategies.symmetric_mm import SymmetricMM
 ex = BitfinexL3Exchange()
 ex.register("tBTCUSD", "./l3_merged", ExchangeMetadata(tick_size=0.1))
 
-engine = ProBacktestEngine(fee_rate=0.0001)
+engine = ProBacktestEngine(fee_rate_maker=0.0001, fee_rate_taker=0.0005)
 engine.add_strategy("mm", SymmetricMM("tBTCUSD", half_spread_bps=2.0, order_size=0.01), "tBTCUSD")
 results = engine.run(list(ex.load_ticks("tBTCUSD")))
 print(results["mm"].summary())
@@ -61,7 +61,7 @@ print(results["mm"].summary())
 ## Known limitations
 
 - Only forward-looking: no retroactive history, only what you capture.
-- Only Bitfinex expose true L3 publicly Binance and most other
+- Only Bitfinex exposes true L3 publicly Binance and most other
   major venues cap out at L2, at any price tier.
 - The listener needs a stable, long-running process (or reconnect handling
   will do its job more often than you'd like) a small VPS works better
