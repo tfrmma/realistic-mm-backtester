@@ -107,7 +107,7 @@ class ProBacktestEngine:
 
         self._land_pending(state, ts, book)
 
-        for fill in state.queue_sim.process_tick(book, trades):
+        for fill in state.queue_sim.process_tick(book, trades, tick.known_cancels):
             if fill.order_id in state.pending_cancels:
                 # a cancel was in flight for this order but the fill beat it
                 # to the exchange how much queue time had the order already
