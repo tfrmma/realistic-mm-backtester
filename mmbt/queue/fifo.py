@@ -136,10 +136,22 @@ class FIFOQueueSimulator:
             return True
         return False
 
-    def process_tick(self, book: OrderBook, trades: list[Trade]) -> list[Fill]:
+    def process_tick(
+        self,
+        book: OrderBook,
+        trades: list[Trade],
+        known_cancels: dict[float, float] | None = None,
+    ) -> list[Fill]:
+        # known_cancels (ground-truth cancelled size per price, e.g. from
+        # BitfinexL3Exchange) is only honored on the pure-Python path today.
+        # The Rust core's process_tick only accepts (bids, asks, trades) --
+        # see _process_tick_rust below -- so on that path we currently fall
+        # back to its own internal size-delta inference regardless. If you
+        # need known_cancels honored, construct FIFOQueueSimulator(...,
+        # use_rust=False).
         if self._core is not None:
             return self._process_tick_rust(book, trades)
-        return self._process_tick_python(book, trades)
+        return self._process_tick_python(book, trades, known_cancels)
 
     def active_orders(self) -> list[Order]:
         if self._core is not None:
@@ -168,11 +180,16 @@ class FIFOQueueSimulator:
             self._order_cache.pop(oid, None)
         return fills
 
-    def _process_tick_python(self, book: OrderBook, trades: list[Trade]) -> list[Fill]:
+    def _process_tick_python(
+        self,
+        book: OrderBook,
+        trades: list[Trade],
+        known_cancels: dict[float, float] | None = None,
+    ) -> list[Fill]:
         if not self._states:
             self._update_book(book)
             return []
-        self._infer_cancels(book)
+        self._infer_cancels(book, known_cancels)
         fills: list[Fill] = []
         for trade in trades:
             dead: list[str] = []
@@ -187,13 +204,27 @@ class FIFOQueueSimulator:
         self._update_book(book)
         return fills
 
-    def _infer_cancels(self, book: OrderBook) -> None:
-        # if book size at a price dropped without a matching trade, assume cancels
-        # TODO: this over-counts when a trade AND a cancel happen in the same tick
+    def _infer_cancels(self, book: OrderBook, known_cancels: dict[float, float] | None = None) -> None:
         current = {lvl.price: lvl.size for lvl in book.bids + book.asks}
         for s in self._states.values():
             if not s.is_active:
                 continue
+
+            if known_cancels is not None:
+                # Ground truth available (e.g. BitfinexL3Exchange, from
+                # explicit is_remove events already filtered to exclude
+                # fill-driven removals -- see l3_bitfinex.py). Use it
+                # directly instead of the heuristic below: this is exact,
+                # not inferred, and doesn't conflate a same-tick trade with
+                # a same-tick cancel the way the size-delta diff does.
+                cancelled = known_cancels.get(s.order.price, 0.0)
+                if cancelled > 0:
+                    s.qty_in_front = max(0.0, s.qty_in_front - cancelled)
+                continue
+
+            # Fallback heuristic: if book size at a price dropped without a
+            # matching trade, assume cancels.
+            # TODO: this over-counts when a trade AND a cancel happen in the same tick
             prev = self._prev_book.get(s.order.price, 0.0)
             curr = current.get(s.order.price, 0.0)
             if prev > curr + 1e-12:
