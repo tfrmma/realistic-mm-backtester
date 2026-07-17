@@ -125,6 +125,27 @@ class _LiveBook:
         return bid_levels, ask_levels
 
 
+def _removal_explained_by_trade(price: float, side_sign: int, trades: list[Trade]) -> bool:
+    """True if a buffered trade looks like it's what emptied this order out
+    of the book (a fill), as opposed to a genuine cancel.
+
+    Bitfinex R0 signals order removal the same way (price == 0) whether the
+    order was fully filled or outright cancelled -- the book alone can't
+    tell you which. We approximate the distinction using the trades channel:
+    a resting bid (side_sign > 0) gets taken out by a SELL-side taker print
+    at that exact price; a resting ask (side_sign < 0) gets taken out by a
+    BUY-side taker print. This is a heuristic, not a guarantee (e.g. it
+    can't distinguish "this exact order got filled" from "some other order
+    at the same price got filled and this one was cancelled a moment
+    later") -- but getting this wrong in either direction is still better
+    than the alternative of treating every removal as a cancel, which
+    double-counts every fill (once via the trade-driven consumption in
+    FIFOQueueState.process_trade, once via known_cancels).
+    """
+    want_side = Side.SELL if side_sign > 0 else Side.BUY
+    return any(t.side == want_side and abs(t.price - price) < 1e-9 for t in trades)
+
+
 def replay_l3(directory: str | Path, symbol: str, depth: int = 10) -> Iterator[MarketTick]:
     """Core replay generator: reads captured book+trades rows for `symbol`
     and yields one MarketTick per exchange message that changed the book
@@ -136,6 +157,12 @@ def replay_l3(directory: str | Path, symbol: str, depth: int = 10) -> Iterator[M
     book = _LiveBook(depth=depth)
     last_msg_type: str | None = None
     trade_buffer: list[Trade] = []
+    # Ground-truth cancelled size since the last emitted tick, by price.
+    # Populated only from update-phase is_remove events not explained by a
+    # same-tick trade (see _removal_explained_by_trade) -- snapshot-phase
+    # removals are book construction, not real cancellations, and are never
+    # added here.
+    known_cancels: dict[float, float] = {}
 
     for row in df.itertuples(index=False):
         if row.channel == "trades":
@@ -155,11 +182,26 @@ def replay_l3(directory: str | Path, symbol: str, depth: int = 10) -> Iterator[M
         if msg_type == "snapshot":
             if last_msg_type not in (None, "snapshot"):
                 # A fresh snapshot after the book was already built means a
-                # reconnect happened discard prior (possibly stale) state.
+                # reconnect happened discard prior (possibly stale) state,
+                # including any cancel tracking accumulated before the drop.
                 book.clear()
+                known_cancels.clear()
             book.apply(int(row.order_id), float(row.price), float(row.amount), bool(row.is_remove))
             last_msg_type = "snapshot"
             continue
+
+        # Decide whether this row's removal (if any) is a genuine cancel
+        # BEFORE the snapshot-completion flush below can clear trade_buffer
+        # -- otherwise a trade and the removal it explains, arriving one
+        # row apart right at the snapshot/update boundary, would have the
+        # trade wiped out from under the check that's supposed to see it.
+        pending_cancel: tuple[float, float] | None = None
+        if msg_type == "update" and bool(row.is_remove):
+            existing = book._orders.get(int(row.order_id))
+            if existing is not None:
+                rm_price, rm_size, rm_side_sign = existing
+                if not _removal_explained_by_trade(rm_price, rm_side_sign, trade_buffer):
+                    pending_cancel = (rm_price, rm_size)
 
         if last_msg_type == "snapshot":
             # Snapshot phase just ended emit exactly one tick for the
@@ -170,10 +212,15 @@ def replay_l3(directory: str | Path, symbol: str, depth: int = 10) -> Iterator[M
                 yield MarketTick(
                     book=OrderBook(bids=bids, asks=asks, ts=row.ts_recv),
                     trades=list(trade_buffer), ts=row.ts_recv,
+                    known_cancels=dict(known_cancels),
                 )
                 trade_buffer.clear()
+                known_cancels.clear()
 
         if msg_type == "update":
+            if pending_cancel is not None:
+                rm_price, rm_size = pending_cancel
+                known_cancels[rm_price] = known_cancels.get(rm_price, 0.0) + rm_size
             book.apply(int(row.order_id), float(row.price), float(row.amount), bool(row.is_remove))
             levels = book.levels()
             if levels is not None:
@@ -181,8 +228,10 @@ def replay_l3(directory: str | Path, symbol: str, depth: int = 10) -> Iterator[M
                 yield MarketTick(
                     book=OrderBook(bids=bids, asks=asks, ts=row.ts_recv),
                     trades=list(trade_buffer), ts=row.ts_recv,
+                    known_cancels=dict(known_cancels),
                 )
                 trade_buffer.clear()
+                known_cancels.clear()
 
         # heartbeat / checksum rows: no book mutation, no tick, but don't
         # clear last_msg_type's snapshot-flush role either.
