@@ -82,6 +82,17 @@ class MarketTick:
     book: OrderBook
     trades: list[Trade]
     ts: float
+    # Ground-truth cancelled size since the previous tick, keyed by price --
+    # only populated by data sources that observe individual order removals
+    # directly (e.g. BitfinexL3Exchange, from explicit is_remove events) as
+    # opposed to inferring cancellation from net displayed-size deltas.
+    # None means "no ground truth available, fall back to inference";
+    # an empty dict means "ground truth available, and it says zero
+    # cancellations this tick" -- these are NOT the same thing, so a data
+    # source that tracks this must always populate a dict (even {}), never
+    # None, or downstream consumers will silently fall back to the
+    # size-delta heuristic on ticks where it isn't actually needed.
+    known_cancels: dict[float, float] | None = None
 
 
 OrderAction = Order | CancelOrder
